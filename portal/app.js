@@ -56,7 +56,7 @@ async function loadData(force) {
     q(sb.from('family_members').select('family_member_id, family_id, member_code, sex, date_of_birth, relationship_to_head, is_active')),
     q(sb.from('baseline_assessments').select('baseline_id, family_id, assessment_date, status, assessment_data, created_at')),
     q(sb.from('visit_records').select('visit_id, family_id, visit_date, visit_number, visit_purpose, persons_contacted, observations, health_education, referral_needed, next_followup_date, status, submitted_at')),
-    q(sb.from('faculty_reviews').select('review_id, family_id, visit_id, baseline_id, decision, feedback, reviewed_at').order('reviewed_at', { ascending: false })),
+    q(sb.from('faculty_reviews').select('review_id, family_id, faculty_id, visit_id, baseline_id, decision, feedback, reviewed_at').order('reviewed_at', { ascending: false })),
     q(sb.from('referrals').select('referral_id, family_id, referral_date, referral_reason, referred_to, status, followup_notes').order('referral_date', { ascending: false })),
     q(sb.from('consent_records').select('family_id, consent_status, consent_date, recorded_at, notice_language, guardian_consent_minors, research_opt_in').order('recorded_at', { ascending: false }))
   ]);
@@ -193,7 +193,7 @@ async function viewStudents() {
   const c = await loadData();
   const rows = c.students.map((s) => {
     const fams = c.families.filter((f) => f.student_id === s.student_id);
-    return `<div class="card"><div class="row"><strong style="flex:1">${esc(s.name)}</strong><span class="small muted">Roll ${esc(s.roll_number)} · ${esc(s.current_phase || '')}</span></div>
+    return `<div class="card"><div class="row"><strong style="flex:1">${esc(s.name)}</strong><span class="small muted">Roll ${esc(s.roll_number)} · ${esc(s.current_phase || '')}</span><button class="btn ghost" data-report="student" data-sid="${s.student_id}">Word report</button></div>
       <div class="list" style="margin-top:10px">${fams.map((f) => `<a class="item" href="#/family/${f.family_id}"><div class="grow"><strong>${esc(f.family_code)}</strong> <span class="small muted">${esc(f.village_or_locality || '')}</span></div>${badge(f.consent_status === 'GRANTED' ? f.enrolment_status : f.consent_status)}</a>`).join('') || '<p class="muted small">No families yet.</p>'}</div></div>`;
   }).join('');
   app.innerHTML = `<h1>Students</h1><p class="muted">${isHOD() ? 'All students of the college.' : 'Students currently assigned to you.'}</p><div class="list sec">${rows || '<div class="card muted">No students assigned.</div>'}</div>`;
@@ -298,20 +298,70 @@ async function viewReferrals() {
     <div class="sec"><h2>Closed (${done.length})</h2><div class="list">${done.map(refItem).join('') || '<p class="muted">None.</p>'}</div></div>`;
 }
 
+// ---------- analytics and Word reports ----------
+async function reportData() {
+  const c = await loadData(true);
+  const [inst, faculty, users, assigns, batches] = await Promise.all([
+    q(sb.from('institutions').select('institution_name, district, state, department_name').eq('institution_id', S.me.institution_id).limit(1)),
+    q(sb.from('faculty').select('faculty_id, user_id, designation, department_name, is_active')),
+    q(sb.from('app_users').select('user_id, full_name')),
+    q(sb.from('mentor_assignments').select('student_id, faculty_id, effective_from, effective_to')),
+    q(sb.from('academic_batches').select('batch_id, batch_name'))
+  ]);
+  const nm = Object.fromEntries(users.map((u) => [u.user_id, u.full_name]));
+  const bn = Object.fromEntries(batches.map((b) => [b.batch_id, b.batch_name]));
+  const stu = await q(sb.from('students').select('student_id, user_id, roll_number, current_phase, batch_id, is_active'));
+  return {
+    institution: inst[0] || {},
+    students: stu.map((s) => ({ ...s, name: nm[s.user_id] || 'Student ' + s.roll_number, batch_name: bn[s.batch_id] })),
+    faculty: faculty.map((f) => ({ ...f, name: nm[f.user_id] || '-' })),
+    assigns, families: c.families, members: c.members, baselines: c.baselines, visits: c.visits,
+    reviews: c.reviews, referrals: c.referrals, consents: c.consents
+  };
+}
+async function downloadReport(kind, studentId) {
+  toast('Preparing the Word report…');
+  try {
+    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js')]);
+    const D = await reportData();
+    const st = D.students.find((s) => s.student_id === studentId);
+    const doc = await R.buildReport(docx, D, {
+      kind, studentId,
+      scopeLabel: kind === 'student' ? `Single student: ${st?.name} (${st?.roll_number})` : (isHOD() ? 'All students of the college (HOD view)' : 'Students assigned to the author'),
+      preparedBy: `${S.me.full_name} (${S.roles.join(', ')})`
+    });
+    const blob = await docx.Packer.toBlob(doc);
+    const day = new Date().toISOString().slice(0, 10);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = kind === 'student' ? `FAP_Student_Report_${st?.roll_number}_${day}.docx` : `FAP_College_Report_${S.institution?.institution_code || ''}_${day}.docx`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    toast('Report downloaded');
+  } catch (e) { fail(e); }
+}
+app.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-report]');
+  if (!b) return;
+  b.disabled = true; downloadReport(b.dataset.report, b.dataset.sid).finally(() => (b.disabled = false));
+});
+
 async function viewOverview() {
   setTab('overview');
-  if (!isHOD()) { location.hash = '#/'; return; }
-  const c = await loadData();
-  const count = (arr, key) => arr.reduce((m, x) => ((m[x[key]] = (m[x[key]] || 0) + 1), m), {});
-  const box = (title, obj) => `<div class="card"><h2>${esc(title)}</h2>${Object.entries(obj).map(([k, n]) => `<div class="row"><span style="flex:1">${badge(k)}</span><strong>${n}</strong></div>`).join('') || '<p class="muted small">None.</p>'}</div>`;
-  const perStudent = c.students.map((s) => {
-    const fams = c.families.filter((f) => f.student_id === s.student_id).map((f) => f.family_id);
-    const vis = c.visits.filter((v) => fams.includes(v.family_id)).length;
-    return `<tr><td>${esc(s.name)}</td><td>${esc(s.roll_number)}</td><td>${fams.length}</td><td>${vis}</td></tr>`;
-  }).join('');
-  app.innerHTML = `<h1>College overview</h1><p class="muted">${esc(S.institution?.institution_name || '')} · as of ${fmtDate(new Date())}</p>
-    <div class="grid sec">${box('Family consent', count(c.families, 'consent_status'))}${box('Family enrolment', count(c.families, 'enrolment_status'))}${box('Baselines', count(c.baselines, 'status'))}${box('Visits', count(c.visits, 'status'))}${box('Referrals', count(c.referrals, 'status'))}</div>
-    <div class="sec"><h2>Students</h2><div class="tbox"><table><thead><tr><th>Student</th><th>Roll</th><th>Families</th><th>Visits</th></tr></thead><tbody>${perStudent}</tbody></table></div></div>`;
+  if (!isHOD() && !S.roles.includes('AUDITOR')) { location.hash = '#/'; return; }
+  const [D, R] = await Promise.all([reportData(), import('./report.js')]);
+  const A = R.computeAnalytics(D);
+  const tbl = (rows) => `<div class="tbox"><table><thead><tr><th>Indicator</th><th>Number (%)</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td><strong>${esc(v)}</strong></td></tr>`).join('')}</tbody></table></div>`;
+  app.innerHTML = `<div class="row"><div style="flex:1"><h1>College overview</h1><p class="muted">${esc(D.institution.institution_name || '')} · ${esc(D.institution.district || '-')}, ${esc(D.institution.state || '-')} · as of ${fmtDate(new Date())}</p></div>
+      <button class="btn" data-report="college">Download college report (Word)</button></div>
+    <div class="grid sec" style="align-items:start">
+      <div><h2>Coverage and progress</h2>${tbl(A.coverage)}</div>
+      <div><h2>Health findings from baselines</h2>${tbl(A.health)}</div>
+    </div>
+    <div class="sec"><h2>Students and mentors</h2><div class="tbox"><table><thead><tr><th>Roll</th><th>Student</th><th>Batch</th><th>Phase</th><th>Mentor</th><th>Families</th><th>Consent</th><th>Baselines</th><th>Visits</th><th>Last visit</th><th>Open ref.</th><th></th></tr></thead><tbody>
+      ${A.studentRows.map((r) => `<tr>${r.cells.map((c) => `<td>${esc(c)}</td>`).join('')}<td><button class="btn ghost" data-report="student" data-sid="${r.s.student_id}">Word</button></td></tr>`).join('')}</tbody></table></div></div>
+    <div class="sec"><h2>Mentor workload</h2><div class="tbox"><table><thead><tr><th>Mentor</th><th>Designation</th><th>Students</th><th>Families</th><th>Waiting for review</th><th>Reviews done</th></tr></thead><tbody>
+      ${A.mentorRows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div>`;
 }
 
 // ---------- my password ----------
@@ -388,6 +438,13 @@ async function viewManage() {
   app.innerHTML = `
     <h1>Manage</h1><p class="muted">${esc(S.institution?.institution_name || '')} · accounts, batches, mentors${isHOD() ? ', family allotment' : ''}</p>
 
+    ${isIA() ? `<div class="sec card"><h2>College details (printed on reports)</h2>
+      <form id="cf" class="grid">
+        <div><label class="lbl" for="cn">Name of Medical College</label><input id="cn" required></div>
+        <div><label class="lbl" for="cd">District</label><input id="cd" required></div>
+        <div><label class="lbl" for="cs">State</label><input id="cs" required></div>
+        <div style="align-self:end"><button class="btn">Save college details</button></div>
+      </form></div>` : ''}
     <div class="sec card"><h2>Add a person</h2>
       <form id="uf">
         <div class="grid">
@@ -429,6 +486,18 @@ async function viewManage() {
         <td class="row">${n < 5 ? `<select data-n="${s.student_id}">${[1, 2, 3, 4, 5].filter((k) => k + n <= 5).map((k) => `<option>${k}</option>`).join('')}</select><button class="btn ghost" data-allot="${s.student_id}">Allot</button>` : '<span class="small muted">5 allotted</span>'}</td></tr>`; }).join('')}
       </tbody></table></div></div>` : ''}`;
 
+  if ($('#cf')) {
+    const ci = (await q(sb.from('institutions').select('institution_name, district, state').eq('institution_id', S.me.institution_id).limit(1)))[0] || {};
+    $('#cn').value = ci.institution_name || ''; $('#cd').value = ci.district || ''; $('#cs').value = ci.state || '';
+    $('#cf').onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        const rows = await q(sb.from('institutions').update({ institution_name: $('#cn').value.trim(), district: $('#cd').value.trim(), state: $('#cs').value.trim() }).eq('institution_id', S.me.institution_id).select('institution_id'));
+        if (!rows.length) throw new Error('Not allowed');
+        S.institution.institution_name = $('#cn').value.trim(); toast('College details saved');
+      } catch (err) { fail(err); }
+    };
+  }
   const roleSel = $('#ur');
   const toggle = () => { const r = roleSel.value; document.querySelectorAll('.stu').forEach((x) => (x.hidden = r !== 'STUDENT')); document.querySelectorAll('.fac').forEach((x) => (x.hidden = !(r === 'FACULTY' || r === 'HOD'))); };
   roleSel.onchange = toggle; toggle();
@@ -511,7 +580,7 @@ async function start() {
     if (!S.roles.some((r) => ['FACULTY', 'HOD', 'AUDITOR', 'INSTITUTION_ADMIN'].includes(r))) { await sb.auth.signOut(); return viewLogin('This portal is for faculty, HOD, auditors and the college admin. Students use the mobile app.'); }
     $('#topbar').hidden = false;
     $('#who').textContent = `${S.me.full_name} · ${S.roles.join(', ')}`;
-    $('#tabOverview').hidden = !isHOD();
+    $('#tabOverview').hidden = !(isHOD() || S.roles.includes('AUDITOR'));
     $('#tabManage').hidden = !canManage();
     const reviewer = S.roles.some((r) => ['FACULTY', 'HOD', 'AUDITOR'].includes(r));
     document.querySelectorAll('[data-tab="home"],[data-tab="students"],[data-tab="referrals"]').forEach((a) => (a.hidden = !reviewer));
