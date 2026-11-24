@@ -41,7 +41,8 @@ async function loadMe() {
   const inst = await q(sb.from('institutions').select('institution_name, institution_code').eq('institution_id', S.me.institution_id).limit(1));
   S.institution = inst[0] || null;
   const forms = await q(sb.from('form_versions').select('form_schema'));
-  forms.forEach((f) => (f.form_schema?.questions || []).forEach((qq) => (S.labels[qq.code] = qq.label)));
+  S.order = {}; let n = 0;
+  forms.forEach((f) => (f.form_schema?.questions || []).forEach((qq) => { S.labels[qq.code] = qq.label; if (!(qq.code in S.order)) S.order[qq.code] = n++; }));
   return true;
 }
 
@@ -92,7 +93,7 @@ function flagFor(code, v) {
 }
 
 function qaTable(obj) {
-  const rows = Object.entries(obj || {}).map(([code, v]) =>
+  const rows = Object.entries(obj || {}).sort((a, b) => (S.order?.[a[0]] ?? 999) - (S.order?.[b[0]] ?? 999)).map(([code, v]) =>
     `<tr><td class="code">${esc(code)}</td><td>${esc(S.labels[code] || code)}</td><td>${renderValue(v)}${flagFor(code, v)}</td></tr>`).join('');
   return rows ? `<div class="tbox"><table><thead><tr><th>Code</th><th>Question</th><th>Answer</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted">Nothing recorded.</p>';
 }
@@ -488,6 +489,7 @@ async function route() {
   const h = location.hash.replace(/^#\/?/, '');
   const [page, id] = h.split('/');
   try {
+    if (['', 'students', 'referrals', 'overview'].includes(page || '')) await loadData(true);
     if (page === 'students') return await viewStudents();
     if (page === 'family') return await viewFamily(id);
     if (page === 'baseline') return await viewBaseline(id);

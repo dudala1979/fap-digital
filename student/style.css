@@ -48,3 +48,5 @@ input,select,textarea{width:100%;font:16px 'Noto Sans',sans-serif;border:1px sol
 .chk input{width:22px;height:22px;min-height:0;margin:2px 0 0;flex:none}
 .toast{position:fixed;left:50%;bottom:86px;transform:translateX(-50%);background:var(--ink);color:#fff;padding:10px 16px;border-radius:10px;font-size:14px;z-index:10;max-width:92vw;text-align:center}
 table{width:100%;border-collapse:collapse;font-size:14px}td{padding:8px 4px;border-bottom:1px solid #EDF2F1}
+
+[hidden]{display:none !important}
