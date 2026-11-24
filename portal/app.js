@@ -325,8 +325,16 @@ async function downloadReport(kind, studentId) {
     const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js')]);
     const D = await reportData();
     const st = D.students.find((s) => s.student_id === studentId);
+    let extra = {};
+    if (kind === 'college-analytics') {
+      kind = 'college';
+      const { P, charts } = await analyticsPack();
+      const images = [];
+      for (const c of charts.filter((c) => !c.empty)) { const { blob, w, h } = await svgToPng(c.svg, 2); images.push({ title: c.title, data: new Uint8Array(await blob.arrayBuffer()), w, h }); }
+      extra = { prevalence: P, images };
+    }
     const doc = await R.buildReport(docx, D, {
-      kind, studentId,
+      ...extra, kind, studentId,
       scopeLabel: kind === 'student' ? `Single student: ${st?.name} (${st?.roll_number})` : (isHOD() ? 'All students of the college (HOD view)' : 'Students assigned to the author'),
       preparedBy: `${S.me.full_name} (${S.roles.join(', ')})`
     });
@@ -353,7 +361,7 @@ async function viewOverview() {
   const A = R.computeAnalytics(D);
   const tbl = (rows) => `<div class="tbox"><table><thead><tr><th>Indicator</th><th>Number (%)</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td><strong>${esc(v)}</strong></td></tr>`).join('')}</tbody></table></div>`;
   app.innerHTML = `<div class="row"><div style="flex:1"><h1>College overview</h1><p class="muted">${esc(D.institution.institution_name || '')} · ${esc(D.institution.district || '-')}, ${esc(D.institution.state || '-')} · as of ${fmtDate(new Date())}</p></div>
-      <button class="btn" data-report="college">Download college report (Word)</button></div>
+      <a class="btn ghost" href="#/analytics">Prevalence and charts</a> <button class="btn" data-report="college">Download college report (Word)</button></div>
     <div class="grid sec" style="align-items:start">
       <div><h2>Coverage and progress</h2>${tbl(A.coverage)}</div>
       <div><h2>Health findings from baselines</h2>${tbl(A.health)}</div>
@@ -362,6 +370,56 @@ async function viewOverview() {
       ${A.studentRows.map((r) => `<tr>${r.cells.map((c) => `<td>${esc(c)}</td>`).join('')}<td><button class="btn ghost" data-report="student" data-sid="${r.s.student_id}">Word</button></td></tr>`).join('')}</tbody></table></div></div>
     <div class="sec"><h2>Mentor workload</h2><div class="tbox"><table><thead><tr><th>Mentor</th><th>Designation</th><th>Students</th><th>Families</th><th>Waiting for review</th><th>Reviews done</th></tr></thead><tbody>
       ${A.mentorRows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div>`;
+}
+
+// ---------- analytics (prevalence + infographics) ----------
+const svgToPng = (svg, scale = 2) => new Promise((res, rej) => {
+  const w = Number((svg.match(/width="(\d+)"/) || [])[1] || 900), h = Number((svg.match(/height="(\d+)"/) || [])[1] || 500);
+  const img = new Image();
+  img.onload = () => {
+    const c = document.createElement('canvas'); c.width = w * scale; c.height = h * scale;
+    const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height); x.drawImage(img, 0, 0, c.width, c.height);
+    c.toBlob((b) => (b ? res({ blob: b, w, h }) : rej(new Error('PNG failed'))), 'image/png');
+  };
+  img.onerror = () => rej(new Error('Could not draw chart'));
+  img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+});
+const saveBlob = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); };
+const chartMeta = (D) => ({ place: `${D.institution.institution_name || ''}, ${D.institution.district || '-'}, ${D.institution.state || '-'}.`, source: `Source: FAP Digital Health, data as of ${fmtDate(new Date())}.` });
+async function analyticsPack() {
+  const [D, C] = await Promise.all([reportData(), import('./charts.js')]);
+  const P = C.computePrevalence(D, new Date().toISOString().slice(0, 10));
+  return { D, P, charts: C.allCharts(P, chartMeta(D)) };
+}
+async function viewAnalytics() {
+  setTab('analytics');
+  if (!S.roles.some((r) => ['FACULTY', 'HOD', 'AUDITOR'].includes(r))) { location.hash = '#/'; return; }
+  app.innerHTML = '<p class="muted">Calculating…</p>';
+  const { D, P, charts } = await analyticsPack();
+  S.charts = charts;
+  const f1 = (x) => (x == null ? '-' : (Math.round(x * 10) / 10).toFixed(1));
+  const ci = (a) => (a.N ? `${f1(a.p)} (${f1(a.lo)} to ${f1(a.hi)})` : '-');
+  const sx = (a) => (a.N ? `${f1(a.p)} (${a.n}/${a.N})` : '-');
+  const scope = isHOD() || S.roles.includes('AUDITOR') ? 'All students of the college' : 'Families of students assigned to you';
+  app.innerHTML = `<div class="row"><div style="flex:1"><h1>Analytics</h1><p class="muted">${esc(D.institution.institution_name || '')} · ${esc(D.institution.district || '-')}, ${esc(D.institution.state || '-')} · ${esc(scope)} · as of ${fmtDate(new Date())}</p></div>
+      <button class="btn ghost" id="csvBtn">Prevalence table (CSV)</button>
+      <button class="btn" data-report="college-analytics">Word report with figures</button></div>
+    <div class="card note sec">${P.persons} persons in ${P.households} households with a submitted or verified baseline. Prevalence is point prevalence; 95% confidence interval by the Wilson score method. ${P.persons < 100 ? '<strong>Numbers are still small, so intervals are wide. Interpret with caution before publishing.</strong>' : ''}</div>
+    <div class="sec"><h2>Prevalence with 95% confidence interval</h2><div class="tbox"><table class="ci"><thead><tr><th>Condition</th><th>Population</th><th>n/N</th><th>% (95% CI)</th><th>Male % (n/N)</th><th>Female % (n/N)</th></tr></thead><tbody>
+      ${P.rows.map((r) => `<tr><td>${esc(r.label)}</td><td>${esc(r.pop)}</td><td>${r.all.n}/${r.all.N}</td><td><strong>${ci(r.all)}</strong></td><td>${sx(r.male)}</td><td>${sx(r.female)}</td></tr>`).join('')}</tbody></table></div></div>
+    <div class="sec"><h2>Figures</h2><p class="muted">Each figure carries its title, place, date and source. Use "Download PNG" for slides or papers.</p>
+    <div class="charts">${charts.map((c, i) => `<div class="chart${c.id === 'tiles' ? ' wide' : ''}">${c.svg}<div class="row"><button class="btn ghost" data-png="${i}">Download PNG</button></div></div>`).join('')}</div></div>`;
+  app.querySelectorAll('[data-png]').forEach((b) => (b.onclick = async () => {
+    const c = S.charts[b.dataset.png];
+    try { const { blob } = await svgToPng(c.svg, 3); saveBlob(blob, `FAP_${c.id}_${new Date().toISOString().slice(0, 10)}.png`); } catch (e) { fail(e); }
+  }));
+  $('#csvBtn').onclick = () => {
+    const q2 = (v) => `"${String(v).replace(/"/g, '""')}"`;
+    const lines = [['Condition', 'Population', 'n', 'N', 'Percent', 'CI low', 'CI high', 'Male n', 'Male N', 'Female n', 'Female N'].map(q2).join(',')]
+      .concat(P.rows.map((r) => [r.label, r.pop, r.all.n, r.all.N, f1(r.all.p), f1(r.all.lo), f1(r.all.hi), r.male.n, r.male.N, r.female.n, r.female.N].map(q2).join(',')));
+    lines.push(q2(`${D.institution.institution_name || ''}; data as of ${fmtDate(new Date())}; Wilson 95% CI`));
+    saveBlob(new Blob([lines.join('\r\n')], { type: 'text/csv' }), `FAP_prevalence_${new Date().toISOString().slice(0, 10)}.csv`);
+  };
 }
 
 // ---------- my password ----------
@@ -558,13 +616,14 @@ async function route() {
   const h = location.hash.replace(/^#\/?/, '');
   const [page, id] = h.split('/');
   try {
-    if (['', 'students', 'referrals', 'overview'].includes(page || '')) await loadData(true);
+    if (['', 'students', 'referrals', 'overview', 'analytics'].includes(page || '')) await loadData(true);
     if (page === 'students') return await viewStudents();
     if (page === 'family') return await viewFamily(id);
     if (page === 'baseline') return await viewBaseline(id);
     if (page === 'visit') return await viewVisit(id);
     if (page === 'referrals') return await viewReferrals();
     if (page === 'overview') return await viewOverview();
+    if (page === 'analytics') return await viewAnalytics();
     if (page === 'manage') return await viewManage();
     if (page === 'password') return viewPassword(false);
     if (isIA() && !isHOD() && !S.roles.includes('FACULTY') && !S.roles.includes('AUDITOR')) return await viewManage();
@@ -582,6 +641,7 @@ async function start() {
     $('#who').textContent = `${S.me.full_name} · ${S.roles.join(', ')}`;
     $('#tabOverview').hidden = !(isHOD() || S.roles.includes('AUDITOR'));
     $('#tabManage').hidden = !canManage();
+    $('#tabAnalytics').hidden = !S.roles.some((r) => ['FACULTY', 'HOD', 'AUDITOR'].includes(r));
     const reviewer = S.roles.some((r) => ['FACULTY', 'HOD', 'AUDITOR'].includes(r));
     document.querySelectorAll('[data-tab="home"],[data-tab="students"],[data-tab="referrals"]').forEach((a) => (a.hidden = !reviewer));
     window.onhashchange = route;

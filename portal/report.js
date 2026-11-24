@@ -127,7 +127,7 @@ const WORD = { OPEN: 'Open', IN_PROGRESS: 'In progress', COMPLETED: 'Completed',
 const word = (x) => WORD[x] || x;
 export async function buildReport(docx, D, opts = {}) {
   const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType, ShadingType, AlignmentType, HeadingLevel,
-    Header, Footer, PageNumber, BorderStyle, PageBreak, TableLayoutType } = docx;
+    Header, Footer, PageNumber, BorderStyle, PageBreak, TableLayoutType, ImageRun } = docx;
   const A = computeAnalytics(D, opts.today);
   const inst = D.institution;
   const dateStr = new Date(A.today + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
@@ -224,13 +224,32 @@ export async function buildReport(docx, D, opts = {}) {
     children.push(h1('3. Mentor workload'), table(['Mentor', 'Designation', 'Students', 'Families', 'Waiting for review', 'Reviews done'], A.mentorRows, [2200, 2000, 1100, 1100, 1700, 1500]), gap());
     children.push(h1('4. Health findings from baselines'), p('Based on baselines submitted or verified. Percentages use the number assessed for that item as the denominator.', { italics: true, size: 17, color: '4F5E5B' }),
       table(['Finding', 'Number (%)'], A.health, [6800, 2838]), gap());
+    const P = opts.prevalence;
+    if (P) {
+      const f1 = (x) => (x === null || x === undefined ? '-' : (Math.round(x * 10) / 10).toFixed(1));
+      const ci = (a) => (a.N ? `${f1(a.p)} (${f1(a.lo)}-${f1(a.hi)})` : '-');
+      const sx = (a) => (a.N ? `${f1(a.p)} (${a.n}/${a.N})` : '-');
+      children.push(h1('5. Prevalence with 95% confidence intervals'),
+        p(`Point prevalence among ${P.persons} persons in ${P.households} households with a completed baseline. 95% CI by the Wilson score method. Small numbers give wide intervals; interpret with caution.`, { italics: true, size: 17, color: '4F5E5B' }),
+        table(['Condition', 'Population', 'n/N', '% (95% CI)', 'Male % (n/N)', 'Female % (n/N)'],
+          P.rows.map((r) => [r.label, r.pop, `${r.all.n}/${r.all.N}`, ci(r.all), sx(r.male), sx(r.female)]), [3000, 1500, 800, 1500, 1400, 1400]), gap());
+      if (opts.images && opts.images.length) {
+        children.push(h1('6. Figures'));
+        opts.images.forEach((im, i) => {
+          const wpx = Math.min(640, im.w), hpx = Math.round((im.h * wpx) / im.w);
+          children.push(new Paragraph({ alignment: AlignmentType.CENTER, keepNext: true, children: [new ImageRun({ type: 'png', data: im.data, transformation: { width: wpx, height: hpx }, altText: { title: im.title, description: im.title, name: 'figure' + (i + 1) } })] }),
+            p(`Figure ${i + 1}. ${im.title}`, { italics: true, size: 17, align: AlignmentType.CENTER, after: 200 }));
+        });
+      }
+    }
+    const nS = P ? (opts.images && opts.images.length ? 7 : 6) : 5;
     const refs = D.referrals.slice().sort((a, b) => String(b.referral_date).localeCompare(String(a.referral_date)));
-    children.push(h1('5. Referrals'), refs.length ? table(['Family', 'Date', 'Reason', 'Referred to', 'Status'],
+    children.push(h1(`${nS}. Referrals`), refs.length ? table(['Family', 'Date', 'Reason', 'Referred to', 'Status'],
       refs.map((r) => [D.families.find((f) => f.family_id === r.family_id)?.family_code || '-', r.referral_date, r.referral_reason, r.referred_to || '-', word(r.status)]), [1500, 1100, 3600, 2200, 1200]) : p('No referrals recorded.'), gap());
-    children.push(h1('6. Follow-up overdue'), A.overdue.length ? table(['Family', 'Student', 'Due date'],
+    children.push(h1(`${nS + 1}. Follow-up overdue`), A.overdue.length ? table(['Family', 'Student', 'Due date'],
       A.overdue.map((f) => [f.family_code, D.students.find((s) => s.student_id === f.student_id)?.name || '-', A.nextDue(f.family_id)]), [2500, 4500, 2638]) : p('No overdue follow-ups.'), gap());
   }
-  children.push(p('Privacy: family members are identified by code only. This report contains personal data of students and families under the Digital Personal Data Protection Act, 2023. Share only with authorised college staff.', { italics: true, size: 16, color: '4F5E5B' }));
+  children.push(p('Privacy: family members are identified by code only. This report contains personal data of students and families under the Digital Personal Data Protection Act, 2023. Share only with authorised college staff.', { italics: true, size: 16, color: '4F5E5B', keepNext: true }));
   children.push(p(`Source: FAP Digital Health platform, data as of ${dateStr}.`, { italics: true, size: 16, color: '4F5E5B' }));
 
   const doc = new Document({
