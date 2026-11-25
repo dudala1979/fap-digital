@@ -4,6 +4,7 @@
 // using a non-exportable key held by the browser.
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js';
+import { CREDIT, brand, brandBlock, setBrand } from './brand.js';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, { auth: { persistSession: true, autoRefreshToken: true, storageKey: 'fap-student-auth' } });
 const $ = (s, r = document) => r.querySelector(s);
@@ -281,8 +282,9 @@ function validate(root) {
 }
 
 // ---------------- screens ----------------
+function applyBrand() { const b = brand(), im = $('#clogo'); if (b?.logo) { im.src = b.logo; im.alt = b.name + ' logo'; im.hidden = false; } else im.hidden = true; }
 function head(title, sub, back) {
-  $('#top').hidden = false; $('#title').textContent = title; $('#subtitle').textContent = sub || '';
+  applyBrand(); $('#top').hidden = false; $('#title').textContent = title; $('#subtitle').textContent = sub || '';
   const b = $('#back'); b.hidden = !back; b.onclick = () => (location.hash = back); setChip();
 }
 const famOf = (id) => S.data.families.find((f) => f.family_id === id);
@@ -545,7 +547,7 @@ function viewSync() {
 function viewLogin(msg) {
   $('#top').hidden = true;
   app.innerHTML = `<div style="max-width:420px;margin:40px auto">
-    <div class="logo-big" style="width:64px;height:64px;border-radius:18px;background:var(--brand);display:flex;align-items:center;justify-content:center"><img src="icon-192.png" alt="" width="64" height="64" style="border-radius:18px"></div>
+    ${brandBlock() || `<div class="logo-big" style="width:64px;height:64px;border-radius:18px;background:var(--brand);display:flex;align-items:center;justify-content:center"><img src="icon-192.png" alt="" width="64" height="64" style="border-radius:18px"></div>`}
     <h1 style="margin-top:14px">FAP Student</h1><p class="muted">Family Adoption Programme</p>
     ${msg ? `<div class="note">${esc(msg)}</div>` : ''}
     <form id="lf" class="card" style="margin-top:12px">
@@ -558,7 +560,8 @@ function viewLogin(msg) {
     e.preventDefault(); $('#lb').disabled = true;
     const { error } = await sb.auth.signInWithPassword({ email: $('#em').value.trim(), password: $('#pw').value });
     if (error) return viewLogin(online() ? 'Sign-in failed: ' + error.message : 'You are offline. Sign in once with internet.');
-    start();
+    $('#credit').textContent = CREDIT;
+start();
   };
 }
 
@@ -575,7 +578,8 @@ function viewSetPassword() {
     $('#pb').disabled = true;
     try {
       const { error } = await sb.auth.updateUser({ password: $('#p1').value }); if (error) throw error;
-      await q(sb.rpc('fap_password_changed')); toast('Password saved'); start();
+      await q(sb.rpc('fap_password_changed')); toast('Password saved'); $('#credit').textContent = CREDIT;
+start();
     } catch (err) { toast(friendly(err)); $('#pb').disabled = false; }
   };
 }
@@ -609,6 +613,8 @@ async function start() {
       const st = await q(sb.from('students').select('student_id, roll_number, current_phase').eq('user_id', S.me.user_id).limit(1));
       if (!st.length) { await sb.auth.signOut(); return viewLogin('This app is for students. Faculty use the web portal.'); }
       S.student = st[0];
+      const inst = await q(sb.from('institutions').select('institution_code').eq('institution_id', S.me.institution_id).limit(1));
+      setBrand(inst[0]?.institution_code);
       if (S.me.must_change_password) return viewSetPassword();
     }
     await loadAll();
@@ -617,4 +623,5 @@ async function start() {
   window.onhashchange = route;
   setChip(); route(); syncQueue();
 }
+$('#credit').textContent = CREDIT;
 start();

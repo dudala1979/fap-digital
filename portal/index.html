@@ -7,12 +7,13 @@
 <meta name="robots" content="noindex, nofollow">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=0.4.0">
+<link rel="stylesheet" href="style.css?v=0.4.1">
 </head>
 <body>
 <header class="topbar" id="topbar" hidden>
   <div class="brand">
-    <span class="logo" aria-hidden="true">
+    <img id="clogo" class="clogo" alt="" hidden>
+    <span class="logo" id="flogo" aria-hidden="true">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-5h4v5"/></svg>
     </span>
     <span><strong>FAP Portal</strong><small id="who"></small></span>
@@ -42,7 +43,7 @@
     </div>
   </form>
 </dialog>
-<footer class="foot">FAP Digital Health · Faculty and HOD portal · <span id="ver"></span></footer>
-<script type="module" src="app.js?v=0.4.0"></script>
+<footer class="foot"><span id="credit"></span><br>FAP Digital Health · Faculty and HOD portal · <span id="ver"></span></footer>
+<script type="module" src="app.js?v=0.4.1"></script>
 </body>
 </html>

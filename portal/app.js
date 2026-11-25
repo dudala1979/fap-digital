@@ -2,7 +2,8 @@
 // Plain JavaScript, no build step. Talks to Supabase; the database access rules (RLS)
 // decide what each signed-in person can see. This file never bypasses them.
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
-import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.0';
+import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.1';
+import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.1';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, storageKey: 'fap-portal-auth' }
@@ -11,6 +12,8 @@ const sb = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
 const $ = (s) => document.querySelector(s);
 const app = $('#app');
 $('#ver').textContent = 'v' + APP_VERSION;
+$('#credit').textContent = CREDIT;
+function applyBrand() { const b = brand(), im = $('#clogo'); if (b?.logo) { im.src = b.logo; im.alt = b.name + ' logo'; im.hidden = false; $('#flogo').hidden = true; } else { im.hidden = true; $('#flogo').hidden = false; } }
 
 // ---------- helpers ----------
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -40,6 +43,7 @@ async function loadMe() {
   S.faculty = fac[0] || null;
   const inst = await q(sb.from('institutions').select('institution_name, institution_code').eq('institution_id', S.me.institution_id).limit(1));
   S.institution = inst[0] || null;
+  setBrand(S.institution?.institution_code); applyBrand();
   const forms = await q(sb.from('form_versions').select('form_schema'));
   S.order = {}; let n = 0;
   forms.forEach((f) => (f.form_schema?.questions || []).forEach((qq) => { S.labels[qq.code] = qq.label; if (!(qq.code in S.order)) S.order[qq.code] = n++; }));
@@ -146,7 +150,7 @@ app.addEventListener('click', (e) => {
 function viewLogin(msg) {
   $('#topbar').hidden = true;
   app.innerHTML = `<div class="login card">
-    <h1>FAP Faculty Portal</h1><p class="muted">For mentors and HODs of Community Medicine.</p>
+    ${brandBlock()}<h1>FAP Faculty Portal</h1><p class="muted">For mentors and HODs of Community Medicine.</p>
     ${msg ? `<div class="note">${esc(msg)}</div>` : ''}
     <form id="lf">
       <label class="lbl" for="em">Email</label><input id="em" type="email" autocomplete="username" required>
@@ -322,7 +326,7 @@ async function reportData() {
 async function downloadReport(kind, studentId) {
   toast('Preparing the Word report…');
   try {
-    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.0')]);
+    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.1')]);
     let D = await reportData();
     const st = D.students.find((s) => s.student_id === studentId);
     let extra = {};
@@ -359,7 +363,7 @@ app.addEventListener('click', (e) => {
 async function viewOverview() {
   setTab('overview');
   if (!isHOD() && !S.roles.includes('AUDITOR')) { location.hash = '#/'; return; }
-  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.0')]);
+  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.1')]);
   const A = R.computeAnalytics(D);
   const tbl = (rows) => `<div class="tbox"><table><thead><tr><th>Indicator</th><th>Number (%)</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td><strong>${esc(v)}</strong></td></tr>`).join('')}</tbody></table></div>`;
   app.innerHTML = `<div class="row"><div style="flex:1"><h1>College overview</h1><p class="muted">${esc(D.institution.institution_name || '')} · ${esc(D.institution.district || '-')}, ${esc(D.institution.state || '-')} · as of ${fmtDate(new Date())}</p></div>
@@ -389,7 +393,7 @@ const svgToPng = (svg, scale = 2) => new Promise((res, rej) => {
 const saveBlob = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); };
 const chartMeta = (D) => ({ place: `${D.institution.institution_name || ''}, ${D.institution.district || '-'}, ${D.institution.state || '-'}.`, source: `Source: FAP Digital Health, data as of ${fmtDate(new Date())}.` });
 async function analyticsPack() {
-  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.0')]);
+  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.1')]);
   const today = new Date().toISOString().slice(0, 10), f = S.af || {};
   const D = C.filterData(D0, f, today), fl = C.filterLabel(D0, f);
   const meta = chartMeta(D0); if (fl) meta.place = meta.place + ' ' + fl;
