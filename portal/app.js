@@ -407,8 +407,8 @@ async function viewAnalytics() {
     <div class="card note sec">${P.persons} persons in ${P.households} households with a submitted or verified baseline. Prevalence is point prevalence; 95% confidence interval by the Wilson score method. ${P.persons < 100 ? '<strong>Numbers are still small, so intervals are wide. Interpret with caution before publishing.</strong>' : ''}</div>
     <div class="sec"><h2>Prevalence with 95% confidence interval</h2><div class="tbox"><table class="ci"><thead><tr><th>Condition</th><th>Population</th><th>n/N</th><th>% (95% CI)</th><th>Male % (n/N)</th><th>Female % (n/N)</th></tr></thead><tbody>
       ${P.rows.map((r) => `<tr><td>${esc(r.label)}</td><td>${esc(r.pop)}</td><td>${r.all.n}/${r.all.N}</td><td><strong>${ci(r.all)}</strong></td><td>${sx(r.male)}</td><td>${sx(r.female)}</td></tr>`).join('')}</tbody></table></div></div>
-    <div class="sec"><h2>Figures</h2><p class="muted">Each figure carries its title, place, date and source. Use "Download PNG" for slides or papers.</p>
-    <div class="charts">${charts.map((c, i) => `<div class="chart${c.id === 'tiles' ? ' wide' : ''}">${c.svg}<div class="row"><button class="btn ghost" data-png="${i}">Download PNG</button></div></div>`).join('')}</div></div>`;
+    <div class="sec"><h2>Figures</h2><p class="muted">Each figure carries its title, place, date and source. Use "Download PNG" for slides or papers.${charts.some((c) => c.empty) ? ` Not shown yet (no answers): ${charts.filter((c) => c.empty).map((c) => esc(c.title)).join(', ')}.` : ''}</p>
+    <div class="charts">${charts.map((c, i) => c.empty ? '' : `<div class="chart${['tiles', 'prev', 'sex'].includes(c.id) ? ' wide' : ''}">${c.svg}<div class="row"><button class="btn ghost" data-png="${i}">Download PNG</button></div></div>`).join('')}</div></div>`;
   app.querySelectorAll('[data-png]').forEach((b) => (b.onclick = async () => {
     const c = S.charts[b.dataset.png];
     try { const { blob } = await svgToPng(c.svg, 3); saveBlob(blob, `FAP_${c.id}_${new Date().toISOString().slice(0, 10)}.png`); } catch (e) { fail(e); }
