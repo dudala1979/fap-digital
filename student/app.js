@@ -413,7 +413,7 @@ function viewConsent(id) {
       </ul></div>
     <form id="cf">
       <label class="lbl" for="lang">Language used to explain</label>
-      <select id="lang"><option>Hindi</option><option>English</option><option>Telugu</option><option>Santhali</option><option>Other</option></select>
+      <select id="lang"><option>Telugu</option><option>English</option><option>Hindi</option><option>Urdu</option><option>Other</option></select>
       <label class="lbl" for="nm">Name of adult giving consent</label><input id="nm" required autocomplete="off">
       <label class="lbl" for="rel">Relationship to family</label><select id="rel"><option>Self (head of family)</option><option>Spouse</option><option>Son / Daughter</option><option>Parent</option><option>Other adult member</option></select>
       <div class="card" style="margin-top:14px;padding:4px 14px">

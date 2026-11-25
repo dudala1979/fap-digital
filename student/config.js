@@ -4,7 +4,7 @@
 // "service_role" key here.
 export const SUPABASE_URL = 'https://upavoqmspnpxajjnjhip.supabase.co';
 export const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_qM8hHbS-M998xm0S_pKaVg_rV0O-MDz';
-export const APP_VERSION = '0.3.3 (25 Nov 2026)';
+export const APP_VERSION = '0.3.4 (25 Nov 2026)';
 
 // Credit line shown at the bottom of every screen.
 export const CREDIT = 'Designed and developed by Dr. Shankar Reddy Dudala & Dr. Rajeshwar Rao Alwala';
