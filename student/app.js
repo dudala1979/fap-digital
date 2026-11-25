@@ -634,8 +634,63 @@ async function start() {
     await loadAll();
     if (!S.me) return viewLogin('Please sign in with internet once.');
   } catch (e) { if (!isNet(e)) return viewLogin(friendly(e)); await loadAll().catch((x) => viewLogin(x.message)); }
-  window.onhashchange = route;
-  setChip(); route(); syncQueue();
+  if (!S.me) return;
+  const pin = await getEnc('pin');
+  if (!pin) return viewSetPin();
+  if (!S.unlocked) return viewLock();
+  launch();
 }
+function launch() { window.onhashchange = route; setChip(); route(); syncQueue(); }
+
+// ---------------- app PIN (protects family data if the phone is shared or lost) ----------------
+const LOCK_AFTER_MS = 5 * 60 * 1000;
+async function pinHash(pin, salt) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: new TextEncoder().encode(salt), iterations: 150000 }, key, 256);
+  return Array.from(new Uint8Array(bits), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+const pinField = (id, label) => `<label class="lbl" for="${id}">${label}</label><input id="${id}" type="password" inputmode="numeric" pattern="[0-9]{4,6}" minlength="4" maxlength="6" autocomplete="off" required>`;
+function viewSetPin() {
+  $('#top').hidden = true;
+  app.innerHTML = `<div style="max-width:420px;margin:40px auto"><h1>Set an app PIN</h1>
+    <p class="muted">The PIN keeps family data safe if this phone is shared or lost. The app asks for it when opened and after 5 minutes away.</p>
+    <form id="sp" class="card">${pinField('n1', 'New PIN (4 to 6 digits)')}${pinField('n2', 'Type it again')}
+      <button class="btn full" style="margin-top:16px">Save PIN</button></form></div>`;
+  $('#sp').onsubmit = async (e) => {
+    e.preventDefault();
+    const a = $('#n1').value, b = $('#n2').value;
+    if (!/^[0-9]{4,6}$/.test(a)) return toast('Use 4 to 6 digits');
+    if (a !== b) return toast('The two PINs do not match');
+    if (/^(\d)\1+$/.test(a) || '0123456789'.includes(a) || '9876543210'.includes(a)) return toast('Please avoid easy PINs like 1111 or 1234');
+    const salt = crypto.randomUUID();
+    await putEnc('pin', { salt, hash: await pinHash(a, salt), tries: 0 });
+    S.unlocked = true; toast('PIN saved'); launch();
+  };
+}
+function viewLock() {
+  $('#top').hidden = true;
+  app.innerHTML = `<div style="max-width:420px;margin:40px auto">${brandBlock()}<h1>Enter your PIN</h1>
+    <form id="lk" class="card">${pinField('pn', 'App PIN')}<button class="btn full" style="margin-top:16px">Unlock</button></form>
+    <p class="small muted" style="margin-top:12px">Forgot your PIN? <a href="#" id="forgot">Sign out</a> and sign in again with your password.</p></div>`;
+  setTimeout(() => $('#pn')?.focus(), 50);
+  $('#lk').onsubmit = async (e) => {
+    e.preventDefault();
+    const p = await getEnc('pin');
+    if (p && (await pinHash($('#pn').value, p.salt)) === p.hash) { p.tries = 0; await putEnc('pin', p); S.unlocked = true; return launch(); }
+    p.tries = (p.tries || 0) + 1; await putEnc('pin', p);
+    if (p.tries >= 5) { toast('Too many wrong PINs. Signing out.'); return signOutKeepQueueWarning(true); }
+    toast(`Wrong PIN. ${5 - p.tries} tries left.`); $('#pn').value = '';
+  };
+  $('#forgot').onclick = (e) => { e.preventDefault(); signOutKeepQueueWarning(false); };
+}
+async function signOutKeepQueueWarning(force) {
+  if (!force && S.queue.length && !confirm(`${S.queue.length} entries are not uploaded yet and will be lost. Sign out anyway?`)) return;
+  await sb.auth.signOut(); await kvClear(); location.hash = ''; location.reload();
+}
+let hiddenAt = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { hiddenAt = Date.now(); return; }
+  if (S.unlocked && hiddenAt && Date.now() - hiddenAt > LOCK_AFTER_MS) { S.unlocked = false; window.onhashchange = null; viewLock(); }
+});
 $('#credit').textContent = CREDIT;
 start();

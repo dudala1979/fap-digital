@@ -2,8 +2,8 @@
 // Plain JavaScript, no build step. Talks to Supabase; the database access rules (RLS)
 // decide what each signed-in person can see. This file never bypasses them.
 import { createClient } from './vendor/supabase-2.119.2.js';
-import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.3';
-import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.3';
+import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.4';
+import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.4';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, storageKey: 'fap-portal-auth' }
@@ -242,7 +242,48 @@ async function viewFamily(id) {
     <div class="sec"><h2>Visits</h2><div class="list">${vs.map((v) => `<a class="item" href="#/visit/${v.visit_id}"><div class="grow">Visit ${esc(v.visit_number || '')} · ${fmtDate(v.visit_date)} <span class="small muted">${esc(v.visit_purpose || '')}</span></div>${badge(v.status)}</a>`).join('') || '<p class="muted">No visits yet.</p>'}</div></div>
     <div class="sec"><h2>Referrals</h2><div class="list">${refs.map(refItem).join('') || '<p class="muted">None.</p>'}</div></div>
     ${f.enrolment_status === 'SUBMITTED' || f.enrolment_status === 'VERIFIED' ? `<div class="sec"><h2>Family enrolment</h2>${actionBar('family', f.family_id, f.enrolment_status)}</div>` : ''}
-    ${reviewHistory(revs)}`;
+    ${reviewHistory(revs)}
+    ${isHOD() || isIA() ? `<div class="sec card"><h2>Data protection requests (DPDP)</h2>
+      <p class="small muted">For a family's request to see, correct or erase its data. Every action is recorded.</p>
+      <div class="row"><button class="btn ghost" id="dpExport">Export family data (for the family to see)</button></div>
+      ${isHOD() && f.enrolment_status !== 'INACTIVE' ? `<details style="margin-top:14px"><summary><strong>Erase this family's data</strong></summary>
+        <p class="small">Deletes members, baseline, visits, referrals and reviews for ${esc(f.family_code)}. Keeps only the family code, dates, consent record and your reason. <strong>This cannot be undone.</strong></p>
+        <label class="lbl" for="dpReason">Reason (as told by the family)</label><input id="dpReason" type="text" maxlength="300">
+        <label class="lbl" for="dpCode">Type the family code ${esc(f.family_code)} to confirm</label><input id="dpCode" type="text" autocomplete="off">
+        <div class="row" style="margin-top:10px"><button class="btn danger" id="dpErase">Erase family data</button></div></details>` : ''}
+      ${f.enrolment_status === 'INACTIVE' ? '<p class="small muted">This family is inactive (withdrawn or erased).</p>' : ''}</div>` : ''}`;
+  const ex = $('#dpExport');
+  if (ex) ex.onclick = async () => {
+    ex.disabled = true;
+    try {
+      const [fam, mem2, cons2, bls, vis, rfs] = await Promise.all([
+        q(sb.from('families').select('family_code, village_or_locality, phc_name, enrolled_on, consent_status').eq('family_id', id)),
+        q(sb.from('family_members').select('member_code, full_name, sex, date_of_birth, relationship_to_head').eq('family_id', id).order('member_code')),
+        q(sb.from('consent_records').select('consent_status, consent_date, notice_language, guardian_consent_minors, research_opt_in').eq('family_id', id)),
+        q(sb.from('baseline_assessments').select('assessment_date, status, assessment_data').eq('family_id', id)),
+        q(sb.from('visit_records').select('visit_number, visit_date, status, observations').eq('family_id', id).order('visit_number')),
+        q(sb.from('referrals').select('referral_date, referral_reason, referred_to, status').eq('family_id', id))
+      ]);
+      const label = (o) => (o && typeof o === 'object' && !Array.isArray(o) ? Object.fromEntries(Object.entries(o).map(([k, v]) => [S.labels[k] ? `${k} ${S.labels[k]}` : k, label(v)])) : o);
+      const out = { exported_on: localISO(), college: S.institution?.institution_name, family: fam[0], members: mem2, consent: cons2,
+        baseline: bls.map((b) => ({ ...b, assessment_data: label(b.assessment_data) })), visits: vis.map((v) => ({ ...v, observations: label(v.observations) })), referrals: rfs,
+        note: 'Personal data held by PMRIMS under the Family Adoption Programme. Provided on request under the DPDP Act, 2023.' };
+      await q(sb.rpc('fap_log_request', { p_family: id, p_type: 'ACCESS', p_details: 'Family data exported from portal' }));
+      saveBlob(new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' }), `FAP_family_${f.family_code}_${localISO()}.json`);
+      toast('Exported and recorded');
+    } catch (e) { fail(e); } finally { ex.disabled = false; }
+  };
+  const er = $('#dpErase');
+  if (er) er.onclick = async () => {
+    if ($('#dpCode').value.trim() !== f.family_code) return toast('Type the family code exactly to confirm');
+    if ($('#dpReason').value.trim().length < 5) return toast('Please write the reason');
+    er.disabled = true;
+    try {
+      const r = await q(sb.rpc('fap_erase_family', { p_family: id, p_reason: $('#dpReason').value.trim() }));
+      toast(`Erased ${r.family_code}: ${r.deleted.members} members, ${r.deleted.baselines} baseline, ${r.deleted.visits} visits`);
+      S.cache = {}; await loadData(true); viewFamily(id);
+    } catch (e) { fail(e); er.disabled = false; }
+  };
 }
 
 async function viewBaseline(id) {
@@ -340,7 +381,7 @@ async function reportData() {
 async function downloadReport(kind, studentId) {
   toast('Preparing the Word report…');
   try {
-    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.3')]);
+    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.4')]);
     let D = await reportData();
     const st = D.students.find((s) => s.student_id === studentId);
     let extra = {};
@@ -377,7 +418,7 @@ app.addEventListener('click', (e) => {
 async function viewOverview() {
   setTab('overview');
   if (!isHOD() && !S.roles.includes('AUDITOR')) { location.hash = '#/'; return; }
-  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.3')]);
+  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.4')]);
   const A = R.computeAnalytics(D);
   const tbl = (rows) => `<div class="tbox"><table><thead><tr><th>Indicator</th><th>Number (%)</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td><strong>${esc(v)}</strong></td></tr>`).join('')}</tbody></table></div>`;
   app.innerHTML = `<div class="row"><div style="flex:1"><h1>College overview</h1><p class="muted">${esc(D.institution.institution_name || '')} · ${esc(D.institution.district || '-')}, ${esc(D.institution.state || '-')} · as of ${fmtDate(new Date())}</p></div>
@@ -407,7 +448,7 @@ const svgToPng = (svg, scale = 2) => new Promise((res, rej) => {
 const saveBlob = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); };
 const chartMeta = (D) => ({ place: `${D.institution.institution_name || ''}, ${D.institution.district || '-'}, ${D.institution.state || '-'}.`, source: `Source: FAP Digital Health, data as of ${fmtDate(new Date())}.` });
 async function analyticsPack() {
-  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.3')]);
+  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.4')]);
   const today = localISO(), f = S.af || {};
   const D = C.filterData(D0, f, today), fl = C.filterLabel(D0, f);
   const meta = chartMeta(D0); if (fl) meta.place = meta.place + ' ' + fl;
@@ -468,6 +509,72 @@ async function viewAnalytics() {
   };
 }
 
+// ---------- two-step login (authenticator app, TOTP) ----------
+async function mfaGate() {
+  const { data, error } = await sb.auth.mfa.getAuthenticatorAssuranceLevel();
+  if (error || !data) return true;
+  if (data.nextLevel === 'aal2' && data.currentLevel !== 'aal2') { viewMfaChallenge(); return false; }
+  if (isHOD() && data.nextLevel !== 'aal2' && !S.mfaNagged) { S.mfaNagged = true; setTimeout(() => toast('Please turn on two-step login in My password'), 1200); }
+  return true;
+}
+async function verifiedTotp() {
+  const { data, error } = await sb.auth.mfa.listFactors();
+  if (error) throw error;
+  return (data?.totp || []).filter((f) => f.status === 'verified');
+}
+function viewMfaChallenge() {
+  $('#topbar').hidden = true;
+  app.innerHTML = `<div class="login card">${brandBlock()}<h1>Two-step login</h1>
+    <p class="muted">Open your authenticator app and type the 6-digit code for FAP portal.</p>
+    <form id="mf"><label class="lbl" for="mc">Code</label><input id="mc" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required>
+    <div class="row" style="margin-top:16px"><button class="btn" style="flex:1" id="mb">Verify</button></div></form>
+    <p class="small muted" style="margin-top:12px">Lost your phone? Ask the college admin or developer to reset two-step login. <a href="#" id="mout">Sign out</a></p></div>`;
+  setTimeout(() => $('#mc')?.focus(), 50);
+  $('#mout').onclick = async (e) => { e.preventDefault(); await sb.auth.signOut(); location.hash = ''; viewLogin('Signed out.'); };
+  $('#mf').onsubmit = async (e) => {
+    e.preventDefault(); $('#mb').disabled = true;
+    try {
+      const f = (await verifiedTotp())[0];
+      const { error } = await sb.auth.mfa.challengeAndVerify({ factorId: f.id, code: $('#mc').value.trim() });
+      if (error) throw error;
+      $('#topbar').hidden = false; route();
+    } catch (err) { toast('Code not accepted. Try the newest code.'); $('#mb').disabled = false; $('#mc').value = ''; }
+  };
+}
+async function mfaCard() {
+  const box = $('#mfaBox'); if (!box) return;
+  try {
+    const on = await verifiedTotp();
+    if (on.length) {
+      box.innerHTML = `<p><span class="badge ok">On</span> Two-step login is on for your account.</p><button class="btn ghost" id="mfaOff">Turn off</button>`;
+      $('#mfaOff').onclick = async () => {
+        try { for (const f of on) { const { error } = await sb.auth.mfa.unenroll({ factorId: f.id }); if (error) throw error; } toast('Two-step login turned off'); mfaCard(); } catch (err) { fail(err); }
+      };
+      return;
+    }
+    box.innerHTML = `<p class="small muted">Adds a 6-digit code from an authenticator app (Google Authenticator, Microsoft Authenticator) at every sign-in. Recommended for HOD and faculty.</p><button class="btn" id="mfaOn">Set up two-step login</button>`;
+    $('#mfaOn').onclick = async () => {
+      try {
+        const { data: all } = await sb.auth.mfa.listFactors();
+        for (const f of (all?.all || []).filter((x) => x.status !== 'verified')) await sb.auth.mfa.unenroll({ factorId: f.id });
+        const { data, error } = await sb.auth.mfa.enroll({ factorType: 'totp', friendlyName: 'FAP portal ' + localISO() });
+        if (error) throw error;
+        box.innerHTML = `<ol class="small"><li>Open your authenticator app and scan this code.</li><li>Type the 6-digit code it shows.</li></ol>
+          <img src="${data.totp.qr_code}" alt="QR code for two-step login" width="180" height="180" style="background:#fff;padding:6px;border-radius:8px">
+          <p class="small muted">Can't scan? Enter this key in the app: <code>${esc(data.totp.secret)}</code></p>
+          <form id="mfv"><label class="lbl" for="mv">6-digit code</label><input id="mv" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required>
+          <div class="row" style="margin-top:10px"><button class="btn">Turn on</button></div></form>`;
+        $('#mfv').onsubmit = async (e) => {
+          e.preventDefault();
+          const { error: ve } = await sb.auth.mfa.challengeAndVerify({ factorId: data.id, code: $('#mv').value.trim() });
+          if (ve) return toast('Code not accepted. Try the newest code.');
+          toast('Two-step login is on'); mfaCard();
+        };
+      } catch (err) { fail(err); }
+    };
+  } catch (err) { box.innerHTML = `<p class="small muted">Could not load two-step login: ${esc(err.message || err)}</p>`; }
+}
+
 // ---------- my password ----------
 function viewPassword(forced) {
   setTab('password');
@@ -478,7 +585,9 @@ function viewPassword(forced) {
       <label class="lbl" for="p1">New password (at least 8 characters)</label><input id="p1" type="password" minlength="8" autocomplete="new-password" required>
       <label class="lbl" for="p2">Type it again</label><input id="p2" type="password" minlength="8" autocomplete="new-password" required>
       <div class="row" style="margin-top:16px"><button class="btn" style="flex:1" id="pb">Save password</button></div>
-    </form></div>`;
+    </form></div>
+    ${forced ? '' : '<div class="login card" style="margin-top:16px"><h2>Two-step login</h2><div id="mfaBox"><p class="muted small">Loading…</p></div></div>'}`;
+  if (!forced) mfaCard();
   $('#pf').onsubmit = async (e) => {
     e.preventDefault();
     if ($('#p1').value !== $('#p2').value) return toast('The two passwords do not match');
@@ -692,6 +801,7 @@ async function start() {
     document.querySelectorAll('[data-tab="home"],[data-tab="students"],[data-tab="referrals"]').forEach((a) => (a.hidden = !reviewer));
     window.onhashchange = route;
     if (S.me.must_change_password) return viewPassword(true);
+    if (!(await mfaGate())) return;
     route();
   } catch (e) { fail(e); viewLogin('Could not load your account: ' + (e.message || e)); }
 }
