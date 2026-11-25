@@ -317,8 +317,51 @@ function viewHome() {
   }).join('');
   app.innerHTML = `${returned ? `<div class="note" style="margin-bottom:12px"><strong>${returned} record${returned > 1 ? 's' : ''} returned by your mentor.</strong> Open the family to see the note.</div>` : ''}
     <div class="list">${rows || '<div class="card muted">No families allotted yet. Your HOD allots families.</div>'}</div>
+    ${S.data.families.length ? (() => { const v = S.data.families.filter((f) => baselineOf(f.family_id)?.status === 'VERIFIED').length, n = Math.max(5, S.data.families.length);
+      return `<div class="card" style="margin-top:14px"><strong>My FAP report</strong>
+      <div class="small muted" style="margin:4px 0 10px">${v >= n ? 'All family baselines are verified. Your final report is ready.' : `Interim report: ${v} of ${n} family baselines verified by your mentor. It becomes final when all are verified.`} Made automatically from your records; family members appear by code only.</div>
+      <button class="btn full" id="myReport">Download my report (Word)</button></div>`; })() : ''}
     <p class="small muted" style="margin-top:16px">Data last refreshed: ${fmtDate(S.data.loadedAt)} · v${esc(APP_VERSION)} · <a href="#/sync">Sync and settings</a></p>`;
 }
+
+// ---------------- automatic student report (Word) ----------------
+const svgToPng = (svg, scale = 2) => new Promise((res, rej) => {
+  const w = Number((svg.match(/width="(\d+)"/) || [])[1] || 900), h = Number((svg.match(/height="(\d+)"/) || [])[1] || 500);
+  const img = new Image();
+  img.onload = () => { const c = document.createElement('canvas'); c.width = w * scale; c.height = h * scale; const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height); x.drawImage(img, 0, 0, c.width, c.height); c.toBlob((b) => (b ? res({ blob: b, w, h }) : rej(new Error('Image failed'))), 'image/png'); };
+  img.onerror = () => rej(new Error('Could not draw chart'));
+  img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+});
+async function downloadMyReport(btn) {
+  if (!online()) return toast('Connect to the internet to make the report');
+  btn.disabled = true; toast('Preparing your report…');
+  try {
+    const [docx, R, C] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./studentreport.js'), import('./charts.js')]);
+    const [inst, st, asg] = await Promise.all([
+      q(sb.from('institutions').select('institution_name, district, state, department_name').eq('institution_id', S.me.institution_id).limit(1)),
+      q(sb.from('students').select('roll_number, current_phase, batch_id, academic_batches(batch_name)').eq('student_id', S.student.student_id).limit(1)),
+      q(sb.from('mentor_assignments').select('faculty_id, effective_from, effective_to, faculty(designation, user_id, app_users(full_name))').eq('student_id', S.student.student_id))
+    ]);
+    const today = localISO();
+    const cur = asg.filter((a) => a.effective_from <= today && (!a.effective_to || a.effective_to >= today)).pop() || asg.pop();
+    const D = { institution: inst[0] || {}, student: { name: S.me.full_name, roll_number: st[0]?.roll_number, current_phase: st[0]?.current_phase, batch_name: st[0]?.academic_batches?.batch_name },
+      mentor: cur ? { name: cur.faculty?.app_users?.full_name, designation: cur.faculty?.designation } : null,
+      families: S.data.families, members: S.data.members, baselines: S.data.baselines, visits: S.data.visits, referrals: S.data.referrals, consents: S.data.consents };
+    const meta = { place: `${D.student.name} (${D.student.roll_number || ''}), ${D.institution.institution_name || ''}, ${D.institution.district || ''}, ${D.institution.state || ''}.`, source: `Source: FAP Digital Health, data as of ${fmtDate(today)}.` };
+    const P = C.computePrevalence(D, today), T = C.computeTrends(D, today);
+    const figs = [[C.svgPyramid(P, meta), 'Age and sex of members of my adopted families'], [C.svgPrevalenceBars(P, meta), 'Health problems found (with 95% CI)'],
+      [C.svgDonut(P.house.water, meta), 'Main source of drinking water'], [C.svgDonut(P.house.toilet, meta), 'Toilet facility used']];
+    if (T.paired.n) figs.push([C.svgBpChange(T, meta), 'Change in blood pressure at follow-up']);
+    const images = [];
+    if (P.persons) for (const [svg, title] of figs) { const { blob, w, h } = await svgToPng(svg); images.push({ title, data: new Uint8Array(await blob.arrayBuffer()), w, h }); }
+    const doc = await R.buildStudentReport(docx, D, { today, images });
+    const blob = await docx.Packer.toBlob(doc);
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `FAP_Student_Report_${D.student.roll_number || ''}_${today}.docx`;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    toast('Report downloaded');
+  } catch (e) { toast('Could not make the report: ' + friendly(e)); } finally { btn.disabled = false; }
+}
+document.addEventListener('click', (e) => { const b = e.target.closest('#myReport'); if (b) downloadMyReport(b); });
 
 function viewFamily(id) {
   const f = famOf(id); if (!f) return (app.innerHTML = '<div class="card">Family not found.</div>');
