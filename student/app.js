@@ -2,7 +2,7 @@
 // The database access rules (RLS) decide what a student can see and change.
 // Offline data (cache and pending uploads) is encrypted on the phone with AES-GCM
 // using a non-exportable key held by the browser.
-import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+import { createClient } from './vendor/supabase-2.119.2.js';
 import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js';
 import { CREDIT, brand, brandBlock, setBrand } from './brand.js';
 
@@ -16,13 +16,27 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').ca
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const LBL = { SUBMITTED: 'With mentor', VERIFIED: 'Verified', RETURNED: 'Returned', DRAFT: 'Draft', PENDING: 'Consent needed', GRANTED: 'Consent given', DECLINED: 'Declined', WITHDRAWN: 'Withdrawn', OPEN: 'Open', IN_PROGRESS: 'In progress', COMPLETED: 'Completed', CLOSED: 'Closed', APPROVED: 'Approved', COMMENTED: 'Comment', NONE: 'Not started', QUEUED: 'Waiting to upload', FAILED: 'Upload failed' };
 const badge = (s) => `<span class="badge b-${esc(s)}">${esc(LBL[s] || s)}</span>`;
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => localISO();
 const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
 const ageY = (dob) => dob ? Math.floor((Date.now() - new Date(dob)) / (365.25 * 864e5)) : null;
 const ageM = (dob) => dob ? Math.floor((Date.now() - new Date(dob)) / (30.44 * 864e5)) : null;
 const uuid = () => crypto.randomUUID();
 function toast(m) { const t = $('#toast'); t.textContent = m; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => (t.hidden = true), 3800); }
 async function q(p) { const { data, error } = await p; if (error) throw error; return data; }
+// Reads every row, page by page. The database returns at most 1000 rows per request.
+const PAGE = Math.max(10, Number(new URLSearchParams(location.search).get('pagesize')) || 1000);
+async function qAll(b, pk) {
+  if (pk) b = b.order(pk);
+  const out = [];
+  for (let f = 0; ; f += PAGE) {
+    const { data, error } = await b.range(f, f + PAGE - 1);
+    if (error) throw error;
+    out.push(...data);
+    if (data.length < PAGE) return out;
+  }
+}
+// Local (India) date as YYYY-MM-DD; toISOString() would give the UTC date.
+const localISO = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const isNet = (e) => e instanceof TypeError || /fetch|network|load failed|offline/i.test(e?.message || '');
 function friendly(e) {
   const m = e?.message || String(e);
@@ -71,14 +85,14 @@ async function loadAll(force) {
   if (online()) {
     try {
       const [families, members, consents, baselines, visits, reviews, referrals, forms] = await Promise.all([
-        q(sb.from('families').select('family_id, institution_id, family_code, village_or_locality, phc_name, consent_status, enrolment_status, slot_no')),
-        q(sb.from('family_members').select('family_member_id, family_id, member_code, full_name, sex, date_of_birth, relationship_to_head, is_active')),
-        q(sb.from('consent_records').select('consent_id, family_id, consent_status, consent_date, recorded_at, notice_language, guardian_consent_minors, research_opt_in, consenter_name').order('recorded_at', { ascending: false })),
-        q(sb.from('baseline_assessments').select('baseline_id, family_id, assessment_date, status, assessment_data, form_version_id')),
-        q(sb.from('visit_records').select('visit_id, family_id, visit_date, visit_number, status, observations, persons_contacted, health_education, referral_needed, next_followup_date')),
-        q(sb.from('faculty_reviews').select('review_id, family_id, visit_id, baseline_id, decision, feedback, reviewed_at').order('reviewed_at', { ascending: false })),
-        q(sb.from('referrals').select('referral_id, family_id, referral_date, referral_reason, referred_to, status')),
-        q(sb.from('form_versions').select('form_version_id, form_code, module_code, version_label, status, form_schema'))
+        qAll(sb.from('families').select('family_id, institution_id, family_code, village_or_locality, phc_name, consent_status, enrolment_status, slot_no'), 'family_id'),
+        qAll(sb.from('family_members').select('family_member_id, family_id, member_code, full_name, sex, date_of_birth, relationship_to_head, is_active'), 'family_member_id'),
+        qAll(sb.from('consent_records').select('consent_id, family_id, consent_status, consent_date, recorded_at, notice_language, guardian_consent_minors, research_opt_in, consenter_name').order('recorded_at', { ascending: false }), 'consent_id'),
+        qAll(sb.from('baseline_assessments').select('baseline_id, family_id, assessment_date, status, assessment_data, form_version_id'), 'baseline_id'),
+        qAll(sb.from('visit_records').select('visit_id, family_id, visit_date, visit_number, status, observations, persons_contacted, health_education, referral_needed, next_followup_date'), 'visit_id'),
+        qAll(sb.from('faculty_reviews').select('review_id, family_id, visit_id, baseline_id, decision, feedback, reviewed_at').order('reviewed_at', { ascending: false }), 'review_id'),
+        qAll(sb.from('referrals').select('referral_id, family_id, referral_date, referral_reason, referred_to, status'), 'referral_id'),
+        qAll(sb.from('form_versions').select('form_version_id, form_code, module_code, version_label, status, form_schema'), 'form_version_id')
       ]);
       S.data = { families, members, consents, baselines, visits, reviews, referrals, loadedAt: new Date().toISOString() };
       S.forms = buildForms(forms);

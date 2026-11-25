@@ -1,9 +1,9 @@
 // FAP Faculty / HOD portal v0.1
 // Plain JavaScript, no build step. Talks to Supabase; the database access rules (RLS)
 // decide what each signed-in person can see. This file never bypasses them.
-import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
-import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.2';
-import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.2';
+import { createClient } from './vendor/supabase-2.119.2.js';
+import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.3';
+import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.3';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, storageKey: 'fap-portal-auth' }
@@ -25,6 +25,20 @@ const shortCode = (c) => { const m = String(c || '').match(/M\d+$/); return m ? 
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), 3500); }
 function fail(e) { console.error(e); toast('Error: ' + (e?.message || e)); }
 async function q(promise) { const { data, error } = await promise; if (error) throw error; return data; }
+// Reads every row, page by page. The database returns at most 1000 rows per request.
+const PAGE = Math.max(10, Number(new URLSearchParams(location.search).get('pagesize')) || 1000);
+async function qAll(b, pk) {
+  if (pk) b = b.order(pk);
+  const out = [];
+  for (let f = 0; ; f += PAGE) {
+    const { data, error } = await b.range(f, f + PAGE - 1);
+    if (error) throw error;
+    out.push(...data);
+    if (data.length < PAGE) return out;
+  }
+}
+// Local (India) date as YYYY-MM-DD; toISOString() would give the UTC date.
+const localISO = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 // ---------- session state ----------
 const S = { me: null, roles: [], faculty: null, institution: null, labels: {}, cache: {} };
@@ -44,7 +58,7 @@ async function loadMe() {
   const inst = await q(sb.from('institutions').select('institution_name, institution_code').eq('institution_id', S.me.institution_id).limit(1));
   S.institution = inst[0] || null;
   setBrand(S.institution?.institution_code); applyBrand();
-  const forms = await q(sb.from('form_versions').select('form_schema'));
+  const forms = await qAll(sb.from('form_versions').select('form_schema'), 'form_version_id');
   S.order = {}; let n = 0;
   forms.forEach((f) => (f.form_schema?.questions || []).forEach((qq) => { S.labels[qq.code] = qq.label; if (!(qq.code in S.order)) S.order[qq.code] = n++; }));
   return true;
@@ -54,15 +68,15 @@ async function loadMe() {
 async function loadData(force) {
   if (S.cache.loaded && !force) return S.cache;
   const [students, users, families, members, baselines, visits, reviews, referrals, consents] = await Promise.all([
-    q(sb.from('students').select('student_id, user_id, roll_number, current_phase, is_active')),
-    q(sb.from('app_users').select('user_id, full_name')),
-    q(sb.from('families').select('family_id, student_id, family_code, village_or_locality, phc_name, consent_status, enrolment_status, enrolled_on')),
-    q(sb.from('family_members').select('family_member_id, family_id, member_code, sex, date_of_birth, relationship_to_head, is_active')),
-    q(sb.from('baseline_assessments').select('baseline_id, family_id, assessment_date, status, assessment_data, created_at')),
-    q(sb.from('visit_records').select('visit_id, family_id, visit_date, visit_number, visit_purpose, persons_contacted, observations, health_education, referral_needed, next_followup_date, status, submitted_at')),
-    q(sb.from('faculty_reviews').select('review_id, family_id, faculty_id, visit_id, baseline_id, decision, feedback, reviewed_at').order('reviewed_at', { ascending: false })),
-    q(sb.from('referrals').select('referral_id, family_id, referral_date, referral_reason, referred_to, status, followup_notes').order('referral_date', { ascending: false })),
-    q(sb.from('consent_records').select('family_id, consent_status, consent_date, recorded_at, notice_language, guardian_consent_minors, research_opt_in').order('recorded_at', { ascending: false }))
+    qAll(sb.from('students').select('student_id, user_id, roll_number, current_phase, is_active'), 'student_id'),
+    qAll(sb.from('app_users').select('user_id, full_name'), 'user_id'),
+    qAll(sb.from('families').select('family_id, student_id, family_code, village_or_locality, phc_name, consent_status, enrolment_status, enrolled_on'), 'family_id'),
+    qAll(sb.from('family_members').select('family_member_id, family_id, member_code, sex, date_of_birth, relationship_to_head, is_active'), 'family_member_id'),
+    qAll(sb.from('baseline_assessments').select('baseline_id, family_id, assessment_date, status, assessment_data, created_at'), 'baseline_id'),
+    qAll(sb.from('visit_records').select('visit_id, family_id, visit_date, visit_number, visit_purpose, persons_contacted, observations, health_education, referral_needed, next_followup_date, status, submitted_at'), 'visit_id'),
+    qAll(sb.from('faculty_reviews').select('review_id, family_id, faculty_id, visit_id, baseline_id, decision, feedback, reviewed_at').order('reviewed_at', { ascending: false }), 'review_id'),
+    qAll(sb.from('referrals').select('referral_id, family_id, referral_date, referral_reason, referred_to, status, followup_notes').order('referral_date', { ascending: false }), 'referral_id'),
+    qAll(sb.from('consent_records').select('family_id, consent_status, consent_date, recorded_at, notice_language, guardian_consent_minors, research_opt_in').order('recorded_at', { ascending: false }), 'consent_id')
   ]);
   const userName = Object.fromEntries(users.map((u) => [u.user_id, u.full_name]));
   students.forEach((s) => (s.name = userName[s.user_id] || 'Student ' + s.roll_number));
@@ -307,14 +321,14 @@ async function reportData() {
   const c = await loadData(true);
   const [inst, faculty, users, assigns, batches] = await Promise.all([
     q(sb.from('institutions').select('institution_name, district, state, department_name').eq('institution_id', S.me.institution_id).limit(1)),
-    q(sb.from('faculty').select('faculty_id, user_id, designation, department_name, is_active')),
-    q(sb.from('app_users').select('user_id, full_name')),
-    q(sb.from('mentor_assignments').select('student_id, faculty_id, effective_from, effective_to')),
-    q(sb.from('academic_batches').select('batch_id, batch_name'))
+    qAll(sb.from('faculty').select('faculty_id, user_id, designation, department_name, is_active'), 'faculty_id'),
+    qAll(sb.from('app_users').select('user_id, full_name'), 'user_id'),
+    qAll(sb.from('mentor_assignments').select('student_id, faculty_id, effective_from, effective_to'), 'mentor_assignment_id'),
+    qAll(sb.from('academic_batches').select('batch_id, batch_name'), 'batch_id')
   ]);
   const nm = Object.fromEntries(users.map((u) => [u.user_id, u.full_name]));
   const bn = Object.fromEntries(batches.map((b) => [b.batch_id, b.batch_name]));
-  const stu = await q(sb.from('students').select('student_id, user_id, roll_number, current_phase, batch_id, is_active'));
+  const stu = await qAll(sb.from('students').select('student_id, user_id, roll_number, current_phase, batch_id, is_active'), 'student_id');
   return {
     institution: inst[0] || {},
     students: stu.map((s) => ({ ...s, name: nm[s.user_id] || 'Student ' + s.roll_number, batch_name: bn[s.batch_id] })),
@@ -326,7 +340,7 @@ async function reportData() {
 async function downloadReport(kind, studentId) {
   toast('Preparing the Word report…');
   try {
-    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.2')]);
+    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.3')]);
     let D = await reportData();
     const st = D.students.find((s) => s.student_id === studentId);
     let extra = {};
@@ -345,7 +359,7 @@ async function downloadReport(kind, studentId) {
       preparedBy: `${S.me.full_name} (${S.roles.join(', ')})`
     });
     const blob = await docx.Packer.toBlob(doc);
-    const day = new Date().toISOString().slice(0, 10);
+    const day = localISO();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = kind === 'student' ? `FAP_Student_Report_${st?.roll_number}_${day}.docx` : `FAP_College_Report_${S.institution?.institution_code || ''}_${day}.docx`;
@@ -363,7 +377,7 @@ app.addEventListener('click', (e) => {
 async function viewOverview() {
   setTab('overview');
   if (!isHOD() && !S.roles.includes('AUDITOR')) { location.hash = '#/'; return; }
-  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.2')]);
+  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.3')]);
   const A = R.computeAnalytics(D);
   const tbl = (rows) => `<div class="tbox"><table><thead><tr><th>Indicator</th><th>Number (%)</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td><strong>${esc(v)}</strong></td></tr>`).join('')}</tbody></table></div>`;
   app.innerHTML = `<div class="row"><div style="flex:1"><h1>College overview</h1><p class="muted">${esc(D.institution.institution_name || '')} · ${esc(D.institution.district || '-')}, ${esc(D.institution.state || '-')} · as of ${fmtDate(new Date())}</p></div>
@@ -393,8 +407,8 @@ const svgToPng = (svg, scale = 2) => new Promise((res, rej) => {
 const saveBlob = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); };
 const chartMeta = (D) => ({ place: `${D.institution.institution_name || ''}, ${D.institution.district || '-'}, ${D.institution.state || '-'}.`, source: `Source: FAP Digital Health, data as of ${fmtDate(new Date())}.` });
 async function analyticsPack() {
-  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.2')]);
-  const today = new Date().toISOString().slice(0, 10), f = S.af || {};
+  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.3')]);
+  const today = localISO(), f = S.af || {};
   const D = C.filterData(D0, f, today), fl = C.filterLabel(D0, f);
   const meta = chartMeta(D0); if (fl) meta.place = meta.place + ' ' + fl;
   const P = C.computePrevalence(D, today), T = C.computeTrends(D, today);
@@ -443,14 +457,14 @@ async function viewAnalytics() {
   $('#afReset').onclick = () => { S.af = {}; viewAnalytics(); };
   app.querySelectorAll('[data-png]').forEach((b) => (b.onclick = async () => {
     const c = S.charts[b.dataset.png];
-    try { const { blob } = await svgToPng(c.svg, 3); saveBlob(blob, `FAP_${c.id}_${new Date().toISOString().slice(0, 10)}.png`); } catch (e) { fail(e); }
+    try { const { blob } = await svgToPng(c.svg, 3); saveBlob(blob, `FAP_${c.id}_${localISO()}.png`); } catch (e) { fail(e); }
   }));
   $('#csvBtn').onclick = () => {
     const q2 = (v) => `"${String(v).replace(/"/g, '""')}"`;
     const lines = [['Condition', 'Population', 'n', 'N', 'Percent', 'CI low', 'CI high', 'Male n', 'Male N', 'Female n', 'Female N'].map(q2).join(',')]
       .concat(P.rows.map((r) => [r.label, r.pop, r.all.n, r.all.N, f1(r.all.p), f1(r.all.lo), f1(r.all.hi), r.male.n, r.male.N, r.female.n, r.female.N].map(q2).join(',')));
     lines.push(q2(`${D.institution.institution_name || ''}; data as of ${fmtDate(new Date())}; Wilson 95% CI`));
-    saveBlob(new Blob([lines.join('\r\n')], { type: 'text/csv' }), `FAP_prevalence_${new Date().toISOString().slice(0, 10)}.csv`);
+    saveBlob(new Blob([lines.join('\r\n')], { type: 'text/csv' }), `FAP_prevalence_${localISO()}.csv`);
   };
 }
 
@@ -506,18 +520,18 @@ async function viewManage() {
   setTab('manage');
   if (!canManage()) { location.hash = '#/'; return; }
   const [users, roles, students, faculty, years, batches, assigns, families] = await Promise.all([
-    q(sb.from('app_users').select('user_id, full_name, email, is_active, must_change_password, auth_user_id').order('full_name')),
-    q(sb.from('user_roles').select('user_id, role_code')),
-    q(sb.from('students').select('student_id, user_id, roll_number, batch_id, current_phase, is_active')),
-    q(sb.from('faculty').select('faculty_id, user_id, designation, is_active')),
-    q(sb.from('academic_years').select('academic_year_id, year_label, is_current').order('start_date', { ascending: false })),
-    q(sb.from('academic_batches').select('batch_id, academic_year_id, batch_name, admission_year, current_phase, is_active').order('admission_year', { ascending: false })),
-    q(sb.from('mentor_assignments').select('mentor_assignment_id, student_id, faculty_id, effective_from, effective_to')),
-    isHOD() ? q(sb.from('families').select('family_id, student_id, family_code, slot_no')) : Promise.resolve([])
+    qAll(sb.from('app_users').select('user_id, full_name, email, is_active, must_change_password, auth_user_id').order('full_name'), 'user_id'),
+    qAll(sb.from('user_roles').select('user_id, role_code'), 'user_role_id'),
+    qAll(sb.from('students').select('student_id, user_id, roll_number, batch_id, current_phase, is_active'), 'student_id'),
+    qAll(sb.from('faculty').select('faculty_id, user_id, designation, is_active'), 'faculty_id'),
+    qAll(sb.from('academic_years').select('academic_year_id, year_label, is_current').order('start_date', { ascending: false }), 'academic_year_id'),
+    qAll(sb.from('academic_batches').select('batch_id, academic_year_id, batch_name, admission_year, current_phase, is_active').order('admission_year', { ascending: false }), 'batch_id'),
+    qAll(sb.from('mentor_assignments').select('mentor_assignment_id, student_id, faculty_id, effective_from, effective_to'), 'mentor_assignment_id'),
+    isHOD() ? qAll(sb.from('families').select('family_id, student_id, family_code, slot_no'), 'family_id') : Promise.resolve([])
   ]);
   const name = Object.fromEntries(users.map((u) => [u.user_id, u.full_name]));
   const rolesOf = (id) => roles.filter((r) => r.user_id === id).map((r) => r.role_code);
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localISO();
   const currentMentor = (sid) => assigns.find((a) => a.student_id === sid && a.effective_from <= today && (!a.effective_to || a.effective_to >= today));
   const facName = (fid) => name[faculty.find((f) => f.faculty_id === fid)?.user_id] || '-';
   const activeFac = faculty.filter((f) => f.is_active);
@@ -624,7 +638,7 @@ async function viewManage() {
     if (!sel.value) return;
     sel.disabled = true;
     try {
-      const yesterday = new Date(Date.now() - 864e5).toISOString().slice(0, 10);
+      const yesterday = localISO(new Date(Date.now() - 864e5));
       if (sel.dataset.cur) await q(sb.from('mentor_assignments').update({ effective_to: yesterday }).eq('mentor_assignment_id', sel.dataset.cur).select('mentor_assignment_id'));
       await q(sb.from('mentor_assignments').insert({ institution_id: S.me.institution_id, student_id: sel.dataset.assign, faculty_id: sel.value, effective_from: today, assigned_by: S.me.user_id }));
       toast('Mentor assigned'); viewManage();

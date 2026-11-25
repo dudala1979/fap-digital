@@ -20,7 +20,7 @@ export function wilson(n, N, z = 1.96) {
 const ageAt = (dob, on) => (dob ? Math.floor((new Date(on) - new Date(dob)) / (365.25 * 864e5)) : null);
 
 export function computePrevalence(D, todayISO) {
-  const today = todayISO || new Date().toISOString().slice(0, 10);
+  const today = todayISO || (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })();
   const done = (b) => b && (b.status === 'SUBMITTED' || b.status === 'VERIFIED');
   const latest = {}; D.baselines.filter(done).forEach((b) => { if (!latest[b.family_id] || b.assessment_date > latest[b.family_id].assessment_date) latest[b.family_id] = b; });
   const memKey = Object.fromEntries(D.members.map((m) => [m.family_id + '|' + m.member_code, m]));
@@ -214,7 +214,7 @@ export function allCharts(P, meta) {
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 // f = { batch: batch_name|'', faculty: faculty_id|'', from: 'YYYY-MM-DD'|'', to: 'YYYY-MM-DD'|'' }
 export function currentMentor(D, studentId, todayISO) {
-  const t = todayISO || new Date().toISOString().slice(0, 10);
+  const t = todayISO || (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })();
   const a = D.assigns.filter((x) => x.student_id === studentId && x.effective_from <= t && (!x.effective_to || x.effective_to >= t));
   return a.length ? a[a.length - 1].faculty_id : null;
 }
@@ -253,7 +253,7 @@ function meanCI(xs) {
 }
 const WORDS = { OPEN: 'Open', IN_PROGRESS: 'In progress', COMPLETED: 'Completed', CLOSED: 'Closed', REFUSED: 'Refused', CANCELLED: 'Cancelled', PENDING: 'Pending' };
 export function computeTrends(D, todayISO) {
-  const today = todayISO || new Date().toISOString().slice(0, 10);
+  const today = todayISO || (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })();
   const done = (x) => x && (x.status === 'SUBMITTED' || x.status === 'VERIFIED');
   const B = (D.baselinesAll || D.baselines).filter(done), V = D.visits.filter(done);
   const inMonths = (D.baselinesAll ? D.baselines : B).filter(done);

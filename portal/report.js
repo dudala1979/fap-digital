@@ -4,7 +4,7 @@
 
 // ---------------- analytics ----------------
 export function computeAnalytics(D, todayISO) {
-  const today = todayISO || new Date().toISOString().slice(0, 10);
+  const today = todayISO || (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })();
   const pct = (n, d) => (d ? `${n} (${((100 * n) / d).toFixed(1)}%)` : '-');
   const fam = D.families, mem = D.members.filter((m) => m.is_active !== false);
   const curMentor = (sid) => D.assigns.find((a) => a.student_id === sid && a.effective_from <= today && (!a.effective_to || a.effective_to >= today));
