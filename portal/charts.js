@@ -327,7 +327,7 @@ export function svgBpControl(T, meta) {
 }
 
 export function svgBpChange(T, meta) {
-  const P = T.paired, w = 620, h = 300, left = 150, top = 104, plotW = w - left - 60, lo = 60, hi = 200;
+  const P = T.paired, w = 760, h = 300, left = 110, top = 104, plotW = 380, lo = 60, hi = 200, tx = left + plotW + 24;
   const X = (v) => left + (plotW * (Math.min(hi, Math.max(lo, v)) - lo)) / (hi - lo);
   let b = `<circle cx="30" cy="76" r="6" fill="${C.blue}"/><text x="42" y="80" ${FONT} font-size="12" fill="${INK}">Baseline</text><circle cx="120" cy="76" r="6" fill="${C.aqua}"/><text x="132" y="80" ${FONT} font-size="12" fill="${INK}">Latest follow-up</text>`;
   for (let t = lo; t <= hi; t += 20) b += `<line x1="${X(t)}" y1="${top - 6}" x2="${X(t)}" y2="${top + 110}" stroke="${GRID}"/><text x="${X(t)}" y="${top + 126}" ${FONT} font-size="11" fill="${INK2}" text-anchor="middle">${t}</text>`;
@@ -338,7 +338,8 @@ export function svgBpChange(T, meta) {
     const xb = X(s.base.mean), xl = X(s.last.mean);
     b += `<line x1="${xb}" y1="${y}" x2="${xl}" y2="${y}" stroke="${INK2}" stroke-width="2"/><circle cx="${xb}" cy="${y}" r="8" fill="${C.blue}" stroke="${SURF}" stroke-width="2"><title>${nm} baseline mean ${fmt(s.base.mean)}</title></circle><circle cx="${xl}" cy="${y}" r="8" fill="${C.aqua}" stroke="${SURF}" stroke-width="2"><title>${nm} latest mean ${fmt(s.last.mean)}</title></circle>`;
     const ch = s.change, sign = ch.mean > 0 ? '+' : '';
-    b += `<text x="${Math.max(xb, xl) + 14}" y="${y + 4}" ${FONT} font-size="12" fill="${INK}"><tspan font-weight="700">${fmt(s.base.mean)} → ${fmt(s.last.mean)}</tspan><tspan fill="${INK2}"> (${sign}${fmt(ch.mean)}${ch.lo !== null ? `; 95% CI ${fmt(ch.lo)} to ${fmt(ch.hi)}` : ''})</tspan></text>`;
+    b += `<text x="${tx}" y="${y - 2}" ${FONT} font-size="12.5" font-weight="700" fill="${INK}">${fmt(s.base.mean)} → ${fmt(s.last.mean)} mm Hg</text>`;
+    b += `<text x="${tx}" y="${y + 14}" ${FONT} font-size="11.5" fill="${INK2}">change ${sign}${fmt(ch.mean)}${ch.lo !== null ? ` (95% CI ${fmt(ch.lo)} to ${fmt(ch.hi)})` : ''}</text>`;
   });
   if (!P.n) b += `<text x="${left + plotW / 2}" y="${top + 55}" ${FONT} font-size="13" fill="${INK2}" text-anchor="middle">No paired readings yet</text>`;
   b += `<text x="${left + plotW / 2}" y="${top + 144}" ${FONT} font-size="11.5" fill="${INK2}" text-anchor="middle">mm Hg; red dashed lines: 140 and 90</text>`;
