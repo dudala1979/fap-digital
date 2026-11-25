@@ -4,4 +4,4 @@
 // "service_role" key here.
 export const SUPABASE_URL = 'https://upavoqmspnpxajjnjhip.supabase.co';
 export const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_qM8hHbS-M998xm0S_pKaVg_rV0O-MDz';
-export const APP_VERSION = '0.3 (24 Nov 2026)';
+export const APP_VERSION = '0.4 (25 Nov 2026)';
