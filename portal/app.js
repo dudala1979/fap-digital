@@ -323,19 +323,21 @@ async function downloadReport(kind, studentId) {
   toast('Preparing the Word report…');
   try {
     const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js')]);
-    const D = await reportData();
+    let D = await reportData();
     const st = D.students.find((s) => s.student_id === studentId);
     let extra = {};
     if (kind === 'college-analytics') {
       kind = 'college';
-      const { P, charts } = await analyticsPack();
+      const { D: DF, P, charts, trends, fl } = await analyticsPack();
+      D = DF;
       const images = [];
-      for (const c of charts.filter((c) => !c.empty)) { const { blob, w, h } = await svgToPng(c.svg, 2); images.push({ title: c.title, data: new Uint8Array(await blob.arrayBuffer()), w, h }); }
-      extra = { prevalence: P, images };
+      if (fl) extra.filterNote = fl;
+      for (const c of charts.concat(trends).filter((c) => !c.empty)) { const { blob, w, h } = await svgToPng(c.svg, 2); images.push({ title: c.title, data: new Uint8Array(await blob.arrayBuffer()), w, h }); }
+      extra = { ...extra, prevalence: P, images };
     }
     const doc = await R.buildReport(docx, D, {
       ...extra, kind, studentId,
-      scopeLabel: kind === 'student' ? `Single student: ${st?.name} (${st?.roll_number})` : (isHOD() ? 'All students of the college (HOD view)' : 'Students assigned to the author'),
+      scopeLabel: (kind === 'student' ? `Single student: ${st?.name} (${st?.roll_number})` : (isHOD() || S.roles.includes('AUDITOR') ? 'All students of the college' : 'Students assigned to the author')) + (extra.filterNote ? ' ' + extra.filterNote : ''),
       preparedBy: `${S.me.full_name} (${S.roles.join(', ')})`
     });
     const blob = await docx.Packer.toBlob(doc);
@@ -387,16 +389,26 @@ const svgToPng = (svg, scale = 2) => new Promise((res, rej) => {
 const saveBlob = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); };
 const chartMeta = (D) => ({ place: `${D.institution.institution_name || ''}, ${D.institution.district || '-'}, ${D.institution.state || '-'}.`, source: `Source: FAP Digital Health, data as of ${fmtDate(new Date())}.` });
 async function analyticsPack() {
-  const [D, C] = await Promise.all([reportData(), import('./charts.js')]);
-  const P = C.computePrevalence(D, new Date().toISOString().slice(0, 10));
-  return { D, P, charts: C.allCharts(P, chartMeta(D)) };
+  const [D0, C] = await Promise.all([reportData(), import('./charts.js')]);
+  const today = new Date().toISOString().slice(0, 10), f = S.af || {};
+  const D = C.filterData(D0, f, today), fl = C.filterLabel(D0, f);
+  const meta = chartMeta(D0); if (fl) meta.place = meta.place + ' ' + fl;
+  const P = C.computePrevalence(D, today), T = C.computeTrends(D, today);
+  return { D0, D, P, T, fl, charts: C.allCharts(P, meta), trends: C.trendCharts(T, meta) };
 }
 async function viewAnalytics() {
   setTab('analytics');
   if (!S.roles.some((r) => ['FACULTY', 'HOD', 'AUDITOR'].includes(r))) { location.hash = '#/'; return; }
   app.innerHTML = '<p class="muted">Calculating…</p>';
-  const { D, P, charts } = await analyticsPack();
-  S.charts = charts;
+  const { D0, D, P, T, fl, charts, trends } = await analyticsPack();
+  S.charts = charts.concat(trends);
+  const f = S.af || {};
+  const batches = [...new Set(D0.students.map((x) => x.batch_name).filter(Boolean))].sort();
+  const mentors = D0.faculty.filter((x) => x.is_active !== false).sort((a, b) => a.name.localeCompare(b.name));
+  const opt = (v, t, cur) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(t)}</option>`;
+  const fig = (c, i, wide) => (c.empty ? '' : `<div class="chart${wide ? ' wide' : ''}">${c.svg}<div class="row"><button class="btn ghost" data-png="${i}">Download PNG</button></div></div>`);
+  const nm = (x) => (x == null ? '-' : (Math.round(x * 10) / 10).toFixed(1));
+  const pr = T.paired, chg = (c) => (c.n ? `${c.mean > 0 ? '+' : ''}${nm(c.mean)}${c.lo != null ? ` (${nm(c.lo)} to ${nm(c.hi)})` : ''}` : '-');
   const f1 = (x) => (x == null ? '-' : (Math.round(x * 10) / 10).toFixed(1));
   const ci = (a) => (a.N ? `${f1(a.p)} (${f1(a.lo)} to ${f1(a.hi)})` : '-');
   const sx = (a) => (a.N ? `${f1(a.p)} (${a.n}/${a.N})` : '-');
@@ -404,11 +416,27 @@ async function viewAnalytics() {
   app.innerHTML = `<div class="row"><div style="flex:1"><h1>Analytics</h1><p class="muted">${esc(D.institution.institution_name || '')} · ${esc(D.institution.district || '-')}, ${esc(D.institution.state || '-')} · ${esc(scope)} · as of ${fmtDate(new Date())}</p></div>
       <button class="btn ghost" id="csvBtn">Prevalence table (CSV)</button>
       <button class="btn" data-report="college-analytics">Word report with figures</button></div>
-    <div class="card note sec">${P.persons} persons in ${P.households} households with a submitted or verified baseline. Prevalence is point prevalence; 95% confidence interval by the Wilson score method. ${P.persons < 100 ? '<strong>Numbers are still small, so intervals are wide. Interpret with caution before publishing.</strong>' : ''}</div>
+    <form id="af" class="card filters sec">
+      <label>Batch<select name="batch"><option value="">All batches</option>${batches.map((b) => opt(b, b, f.batch)).join('')}</select></label>
+      ${mentors.length > 1 ? `<label>Mentor<select name="faculty"><option value="">All mentors</option>${mentors.map((m) => opt(m.faculty_id, m.name, f.faculty)).join('')}</select></label>` : ''}
+      <label>From<input type="date" name="from" value="${esc(f.from || '')}"></label>
+      <label>To<input type="date" name="to" value="${esc(f.to || '')}"></label>
+      <div class="row"><button class="btn">Apply</button><button class="btn ghost" type="button" id="afReset">Clear</button></div>
+    </form>
+    <div class="card note sec">${fl ? `<strong>${esc(fl)}</strong> ` : ''}${P.persons} persons in ${P.households} households with a submitted or verified baseline. Prevalence is point prevalence; 95% confidence interval by the Wilson score method. ${P.persons < 100 ? '<strong>Numbers are still small, so intervals are wide. Interpret with caution before publishing.</strong>' : ''}</div>
     <div class="sec"><h2>Prevalence with 95% confidence interval</h2><div class="tbox"><table class="ci"><thead><tr><th>Condition</th><th>Population</th><th>n/N</th><th>% (95% CI)</th><th>Male % (n/N)</th><th>Female % (n/N)</th></tr></thead><tbody>
       ${P.rows.map((r) => `<tr><td>${esc(r.label)}</td><td>${esc(r.pop)}</td><td>${r.all.n}/${r.all.N}</td><td><strong>${ci(r.all)}</strong></td><td>${sx(r.male)}</td><td>${sx(r.female)}</td></tr>`).join('')}</tbody></table></div></div>
     <div class="sec"><h2>Figures</h2><p class="muted">Each figure carries its title, place, date and source. Use "Download PNG" for slides or papers.${charts.some((c) => c.empty) ? ` Not shown yet (no answers): ${charts.filter((c) => c.empty).map((c) => esc(c.title)).join(', ')}.` : ''}</p>
-    <div class="charts">${charts.map((c, i) => c.empty ? '' : `<div class="chart${['tiles', 'prev', 'sex'].includes(c.id) ? ' wide' : ''}">${c.svg}<div class="row"><button class="btn ghost" data-png="${i}">Download PNG</button></div></div>`).join('')}</div></div>`;
+    <div class="charts">${charts.map((c, i) => fig(c, i, ['tiles', 'prev', 'sex'].includes(c.id))).join('')}</div></div>
+    <div class="sec"><h2>Trends: baseline to follow-up</h2>
+      <p class="muted">${T.flagged} members had high BP or known hypertension at baseline; ${pr.n} have a follow-up BP reading.${trends.some((c) => c.empty) ? ` Not shown yet (no data): ${trends.filter((c) => c.empty).map((c) => esc(c.title)).join(', ')}.` : ''}</p>
+      <div class="tbox"><table class="ci"><thead><tr><th>Measure (paired members)</th><th>n</th><th>Baseline mean</th><th>Latest follow-up mean</th><th>Mean change (95% CI)</th></tr></thead><tbody>
+        <tr><td>Systolic BP, mm Hg</td><td>${pr.n}</td><td>${nm(pr.sbp.base.mean)}</td><td>${nm(pr.sbp.last.mean)}</td><td><strong>${chg(pr.sbp.change)}</strong></td></tr>
+        <tr><td>Diastolic BP, mm Hg</td><td>${pr.n}</td><td>${nm(pr.dbp.base.mean)}</td><td>${nm(pr.dbp.last.mean)}</td><td><strong>${chg(pr.dbp.change)}</strong></td></tr>
+        <tr><td>BP below 140/90</td><td>${pr.n}</td><td>${pr.ctlBase}/${pr.n}</td><td>${pr.ctlLast}/${pr.n}</td><td>-</td></tr></tbody></table></div>
+      <div class="charts sec">${trends.map((c, i) => fig(c, charts.length + i, c.id === 'monthly')).join('')}</div></div>`;
+  $('#af').onsubmit = (e) => { e.preventDefault(); const v = Object.fromEntries(new FormData(e.target)); if (v.from && v.to && v.from > v.to) return toast('From date is after To date'); S.af = v; viewAnalytics(); };
+  $('#afReset').onclick = () => { S.af = {}; viewAnalytics(); };
   app.querySelectorAll('[data-png]').forEach((b) => (b.onclick = async () => {
     const c = S.charts[b.dataset.png];
     try { const { blob } = await svgToPng(c.svg, 3); saveBlob(blob, `FAP_${c.id}_${new Date().toISOString().slice(0, 10)}.png`); } catch (e) { fail(e); }
