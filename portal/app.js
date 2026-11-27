@@ -2,8 +2,9 @@
 // Plain JavaScript, no build step. Talks to Supabase; the database access rules (RLS)
 // decide what each signed-in person can see. This file never bypasses them.
 import { createClient } from './vendor/supabase-2.119.2.js';
-import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.7';
-import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.7';
+import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.8';
+import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.8';
+import { FOODS } from './nutrition.js?v=0.4.8';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, storageKey: 'fap-portal-auth' }
@@ -68,7 +69,7 @@ async function loadMe() {
 // Loads everything this user is allowed to see (RLS filters it).
 async function loadData(force) {
   if (S.cache.loaded && !force) return S.cache;
-  const [students, users, families, members, baselines, visits, reviews, referrals, consents] = await Promise.all([
+  const [students, users, families, members, baselines, visits, reviews, referrals, consents, evidence] = await Promise.all([
     qAll(sb.from('students').select('student_id, user_id, roll_number, current_phase, is_active'), 'student_id'),
     qAll(sb.from('app_users').select('user_id, full_name'), 'user_id'),
     qAll(sb.from('families').select('family_id, student_id, family_code, village_or_locality, phc_name, consent_status, enrolment_status, enrolled_on'), 'family_id'),
@@ -77,14 +78,15 @@ async function loadData(force) {
     qAll(sb.from('visit_records').select('visit_id, family_id, visit_date, visit_number, visit_purpose, persons_contacted, observations, health_education, referral_needed, next_followup_date, status, submitted_at'), 'visit_id'),
     qAll(sb.from('faculty_reviews').select('review_id, family_id, faculty_id, visit_id, baseline_id, decision, feedback, reviewed_at').order('reviewed_at', { ascending: false }), 'review_id'),
     qAll(sb.from('referrals').select('referral_id, family_id, referral_date, referral_reason, referred_to, status, followup_notes').order('referral_date', { ascending: false }), 'referral_id'),
-    qAll(sb.from('consent_records').select('family_id, consent_status, consent_date, recorded_at, notice_language, guardian_consent_minors, research_opt_in').order('recorded_at', { ascending: false }), 'consent_id')
+    qAll(sb.from('consent_records').select('family_id, consent_status, consent_date, recorded_at, notice_language, guardian_consent_minors, research_opt_in').order('recorded_at', { ascending: false }), 'consent_id'),
+    qAll(sb.from('competency_evidence').select('evidence_id, student_id, family_id, activity_type, activity_date, competency, phase, evidence_type, description, attachment, attachment_consent, reflection, status, mentor_rating, mentor_feedback, reviewed_at'), 'evidence_id').catch(() => [])
   ]);
   const userName = Object.fromEntries(users.map((u) => [u.user_id, u.full_name]));
   students.forEach((s) => (s.name = userName[s.user_id] || 'Student ' + s.roll_number));
   const studentById = Object.fromEntries(students.map((s) => [s.student_id, s]));
   families.forEach((f) => (f.student = studentById[f.student_id]));
   const famById = Object.fromEntries(families.map((f) => [f.family_id, f]));
-  Object.assign(S.cache, { loaded: true, students, families, members, baselines, visits, reviews, referrals, consents, famById, studentById });
+  Object.assign(S.cache, { loaded: true, students, families, members, baselines, visits, reviews, referrals, consents, evidence, famById, studentById });
   return S.cache;
 }
 
@@ -95,6 +97,8 @@ function setTab(name) {
 
 function renderValue(v) {
   if (v === null || v === undefined || v === '') return '<span class="muted">-</span>';
+  if (typeof v === 'string' && /^data:image\/(png|jpeg);base64,/.test(v)) return `<img src="${esc(v)}" alt="Sketch" style="max-width:100%;width:420px;border:1px solid #d0d8e2;border-radius:8px;background:#fff">`;
+  if (Array.isArray(v) && v.length && v[0] && typeof v[0] === 'object' && 'f' in v[0]) return v.map((r) => `${esc((FOODS.find((f) => f.id === r.f) || {}).name || r.f)}: ${esc(r.g)} g`).join('<br>');
   if (Array.isArray(v)) return esc(v.join(', '));
   if (typeof v === 'object') return Object.entries(v).map(([k, x]) => `${esc(k)}: ${esc(Array.isArray(x) ? x.join(', ') : x)}`).join('<br>');
   return esc(v);
@@ -206,6 +210,7 @@ async function viewHome() {
       <div class="card stat"><b>${queue.length}</b><span>Waiting for your review</span></div>
       <div class="card stat"><b>${openRef.length}</b><span>Open referrals</span></div>
     </div>
+    ${(() => { const n = (c.evidence || []).filter((e) => e.status === 'SUBMITTED').length; return n ? `<div class="note sec"><a href="#/logbook"><strong>${n} competency logbook entr${n === 1 ? 'y' : 'ies'}</strong> waiting for your rating</a></div>` : ''; })()}
     <div class="sec"><h2>Review queue</h2>${queue.length ? `<div class="list">${queue.join('')}</div>` : '<div class="card muted">Nothing waiting. Well done.</div>'}</div>`;
 }
 
@@ -384,7 +389,7 @@ async function reportData() {
 async function downloadReport(kind, studentId) {
   toast('Preparing the Word report…');
   try {
-    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.7')]);
+    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.8')]);
     let D = await reportData();
     const st = D.students.find((s) => s.student_id === studentId);
     let extra = {};
@@ -421,7 +426,7 @@ app.addEventListener('click', (e) => {
 async function viewOverview() {
   setTab('overview');
   if (!isHOD() && !S.roles.includes('AUDITOR')) { location.hash = '#/'; return; }
-  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.7')]);
+  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.8')]);
   const A = R.computeAnalytics(D);
   const tbl = (rows) => `<div class="tbox"><table><thead><tr><th>Indicator</th><th>Number (%)</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td><strong>${esc(v)}</strong></td></tr>`).join('')}</tbody></table></div>`;
   app.innerHTML = `<div class="row"><div style="flex:1"><h1>College overview</h1><p class="muted">${esc(D.institution.institution_name || '')} · ${esc(D.institution.district || '-')}, ${esc(D.institution.state || '-')} · as of ${fmtDate(new Date())}</p></div>
@@ -451,7 +456,7 @@ const svgToPng = (svg, scale = 2) => new Promise((res, rej) => {
 const saveBlob = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); };
 const chartMeta = (D) => ({ place: `${D.institution.institution_name || ''}, ${D.institution.district || '-'}, ${D.institution.state || '-'}.`, source: `Source: FAP Digital Health, data as of ${fmtDate(new Date())}.` });
 async function analyticsPack() {
-  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.7')]);
+  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.8')]);
   const today = localISO(), f = S.af || {};
   const D = C.filterData(D0, f, today), fl = C.filterLabel(D0, f);
   const meta = chartMeta(D0); if (fl) meta.place = meta.place + ' ' + fl;
@@ -769,6 +774,46 @@ async function viewManage() {
   }));
 }
 
+
+// ---------- competency logbook (ST06 mentor rating, ST07 decision, ST08 HOD overview) ----------
+const COMPS = ['FAP-C1', 'FAP-C2', 'FAP-C3', 'FAP-C4', 'FAP-C5', 'FAP-C6'];
+const COMP_TXT = { 'FAP-C1': 'Family profile, history, examination', 'FAP-C2': 'Screening mobilization, check-up coordination', 'FAP-C3': 'Follow-up of treatment, vaccination, remedial measures', 'FAP-C4': 'Health promotion, environment protection', 'FAP-C5': 'Counselling; family health trajectory', 'FAP-C6': 'Health team, intersectoral action' };
+async function viewLogbook() {
+  setTab('logbook');
+  const c = await loadData(true);
+  const ev = (c.evidence || []).slice().sort((a, b) => String(b.activity_date).localeCompare(String(a.activity_date)));
+  const pend = ev.filter((e) => e.status === 'SUBMITTED');
+  const stName = (sid) => c.studentById[sid]?.name || 'Student';
+  const cell = (sid, comp) => { const x = ev.filter((e) => e.student_id === sid && e.competency === comp); const v = x.filter((e) => e.status === 'VERIFIED'); const best = v.map((e) => e.mentor_rating).sort().join('');
+    return x.length ? `<td style="text-align:center">${v.length ? `<strong>${v.length}</strong>` : '0'}${x.length > v.length ? `<span class="small muted"> +${x.length - v.length}</span>` : ''}${best ? `<div class="small muted">${esc(best)}</div>` : ''}</td>` : '<td style="text-align:center" class="muted">-</td>'; };
+  const done = (sid) => COMPS.filter((cp) => ev.some((e) => e.student_id === sid && e.competency === cp && e.status === 'VERIFIED')).length;
+  app.innerHTML = `<h1>Competency logbook</h1>
+    <p class="muted">Students record FAP activities with evidence. Verify each with a rating: B below, M meets, E exceeds expectations. Questionnaire completion alone is not a competency.</p>
+    <div class="sec"><h2>Waiting for your rating (${pend.length})</h2>
+    ${pend.length ? pend.map((e) => `<div class="card" style="margin-bottom:10px" id="ev-${e.evidence_id}">
+      <div class="row"><strong style="flex:1">${esc(stName(e.student_id))} · ${esc(e.competency)}</strong>${badge(e.status)}</div>
+      <div class="small muted">${esc(COMP_TXT[e.competency] || '')} · ${esc(e.activity_type)} · ${esc(e.evidence_type)} · ${esc(e.phase || '')} · ${fmtDate(e.activity_date)}${e.family_id ? ' · ' + esc(c.famById[e.family_id]?.family_code || '') : ''}</div>
+      <p><strong>What was done:</strong> ${esc(e.description || '-')}</p><p><strong>Reflection:</strong> ${esc(e.reflection || '-')}</p>
+      ${e.attachment ? `<img src="${esc(e.attachment)}" alt="Evidence photo" style="max-width:260px;border-radius:8px">` : ''}
+      <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:8px">
+        <select data-rate="${e.evidence_id}"><option value="">Rating…</option><option value="B">B: below expectations</option><option value="M">M: meets expectations</option><option value="E">E: exceeds expectations</option></select>
+        <input data-note="${e.evidence_id}" placeholder="Feedback to the student" style="flex:1;min-width:200px">
+        <button class="btn ok" data-ev="VERIFIED" data-id="${e.evidence_id}">Verify</button>
+        <button class="btn ghost" data-ev="NEEDS_REPEAT" data-id="${e.evidence_id}">Needs repeat</button>
+        <button class="btn bad" data-ev="RETURNED" data-id="${e.evidence_id}">Return</button></div></div>`).join('') : '<div class="card muted">Nothing waiting.</div>'}</div>
+    <div class="sec"><h2>Competency status by student</h2>
+      <p class="small muted">Number verified (+ waiting or returned). Letters show the ratings given.</p>
+      <div class="tbox"><table><thead><tr><th>Student</th>${COMPS.map((cp) => `<th title="${esc(COMP_TXT[cp])}">${cp.replace('FAP-', '')}</th>`).join('')}<th>Competencies covered</th></tr></thead><tbody>
+      ${c.students.map((st) => `<tr><td>${esc(st.name)} <span class="small muted">${esc(st.roll_number || '')}</span></td>${COMPS.map((cp) => cell(st.student_id, cp)).join('')}<td><strong>${done(st.student_id)} / 6</strong></td></tr>`).join('') || `<tr><td colspan="8" class="muted">No students.</td></tr>`}</tbody></table></div></div>`;
+  app.querySelectorAll('[data-ev]').forEach((b) => (b.onclick = async () => {
+    const id = b.dataset.id, dec = b.dataset.ev, rate = app.querySelector(`[data-rate="${id}"]`).value, note = app.querySelector(`[data-note="${id}"]`).value.trim();
+    if (dec === 'VERIFIED' && !rate) return toast('Choose a rating first');
+    if (dec !== 'VERIFIED' && !note) return toast('Write a short note for the student');
+    b.disabled = true;
+    try { const msg = await q(sb.rpc('fap_review_evidence', { p_id: id, p_decision: dec, p_rating: rate || null, p_feedback: note || null })); toast(msg); S.cache = {}; viewLogbook(); } catch (e) { fail(e); b.disabled = false; }
+  }));
+}
+
 // ---------- router ----------
 async function route() {
   const h = location.hash.replace(/^#\/?/, '');
@@ -783,6 +828,7 @@ async function route() {
     if (page === 'overview') return await viewOverview();
     if (page === 'analytics') return await viewAnalytics();
     if (page === 'manage') return await viewManage();
+    if (page === 'logbook') return await viewLogbook();
     if (page === 'password') return viewPassword(false);
     if (isIA() && !isHOD() && !S.roles.includes('FACULTY') && !S.roles.includes('AUDITOR')) return await viewManage();
     return await viewHome();
@@ -801,7 +847,7 @@ async function start() {
     $('#tabManage').hidden = !canManage();
     $('#tabAnalytics').hidden = !S.roles.some((r) => ['FACULTY', 'HOD', 'AUDITOR'].includes(r));
     const reviewer = S.roles.some((r) => ['FACULTY', 'HOD', 'AUDITOR'].includes(r));
-    document.querySelectorAll('[data-tab="home"],[data-tab="students"],[data-tab="referrals"]').forEach((a) => (a.hidden = !reviewer));
+    document.querySelectorAll('[data-tab="home"],[data-tab="students"],[data-tab="referrals"],[data-tab="logbook"]').forEach((a) => (a.hidden = !reviewer));
     window.onhashchange = route;
     if (S.me.must_change_password) return viewPassword(true);
     if (!(await mfaGate())) return;

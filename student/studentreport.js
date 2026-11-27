@@ -174,6 +174,14 @@ export async function buildStudentReport(docx, D0, opts = {}) {
   C.push(h1(`${n++}. Health education given`), edu.length ? table(['Topic', 'Times given'], edu.map(([k, v]) => [k, String(v)]), [6800, 2838]) : p('Not recorded.'));
 
   // declaration
+  const EV = (D.evidence || []).slice().sort((a, b) => String(a.activity_date).localeCompare(String(b.activity_date)));
+  C.push(h1(`${n++}. Competency logbook (NMC FAP)`));
+  if (EV.length) {
+    const CP = ['FAP-C1', 'FAP-C2', 'FAP-C3', 'FAP-C4', 'FAP-C5', 'FAP-C6'];
+    C.push(table(['Competency', 'Entries', 'Verified by mentor', 'Ratings'], CP.map((c) => { const x = EV.filter((e) => e.competency === c), v = x.filter((e) => e.status === 'VERIFIED'); return [c, String(x.length), String(v.length), v.map((e) => e.mentor_rating).join(' ') || '-']; }), [2400, 1600, 2600, 3038]),
+      p('Entries', { bold: true, size: 18, keepNext: true }),
+      table(['Date', 'Competency', 'Activity', 'Evidence', 'Status', 'Rating'], EV.map((e) => [fmtDate(e.activity_date), e.competency, e.activity_type, e.evidence_type, word(e.status === 'NEEDS_REPEAT' ? 'Needs repeat' : e.status), e.mentor_rating || '-']), [1200, 1200, 2400, 2200, 1500, 1138]));
+  } else C.push(p('No logbook entries recorded yet.', { size: 18, color: INK2 }));
   C.push(h1(`${n++}. Declaration and signatures`),
     p('I declare that the information in this report was collected by me during home visits to the families listed, with their consent, under the guidance of my faculty mentor.'),
     table(['Role', 'Name', 'Signature', 'Date'], [['Student', st.name || '', '', ''], ['Faculty mentor', D.mentor?.name || '', '', ''], ['Head of Department, Community Medicine', '', '', '']], [3200, 3000, 2000, 1438]),

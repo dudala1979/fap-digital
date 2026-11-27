@@ -5,6 +5,7 @@
 import { createClient } from './vendor/supabase-2.119.2.js';
 import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js';
 import { CREDIT, brand, brandBlock, setBrand } from './brand.js';
+import * as NUT from './nutrition.js';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, { auth: { persistSession: true, autoRefreshToken: true, storageKey: 'fap-student-auth' } });
 const $ = (s, r = document) => r.querySelector(s);
@@ -14,7 +15,7 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').ca
 
 // ---------------- small helpers ----------------
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const LBL = { SUBMITTED: 'With mentor', VERIFIED: 'Verified', RETURNED: 'Returned', DRAFT: 'Draft', PENDING: 'Consent needed', GRANTED: 'Consent given', DECLINED: 'Declined', WITHDRAWN: 'Withdrawn', OPEN: 'Open', IN_PROGRESS: 'In progress', COMPLETED: 'Completed', CLOSED: 'Closed', APPROVED: 'Approved', COMMENTED: 'Comment', NONE: 'Not started', QUEUED: 'Waiting to upload', FAILED: 'Upload failed' };
+const LBL = { SUBMITTED: 'With mentor', VERIFIED: 'Verified', RETURNED: 'Returned', DRAFT: 'Draft', PENDING: 'Consent needed', GRANTED: 'Consent given', DECLINED: 'Declined', WITHDRAWN: 'Withdrawn', OPEN: 'Open', IN_PROGRESS: 'In progress', COMPLETED: 'Completed', CLOSED: 'Closed', NEEDS_REPEAT: 'Needs repeat', APPROVED: 'Approved', COMMENTED: 'Comment', NONE: 'Not started', QUEUED: 'Waiting to upload', FAILED: 'Upload failed' };
 const badge = (s) => `<span class="badge b-${esc(s)}">${esc(LBL[s] || s)}</span>`;
 const today = () => localISO();
 const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
@@ -69,8 +70,8 @@ async function getEnc(name) {
 
 // ---------------- state ----------------
 const S = { me: null, student: null, data: null, forms: null, queue: [], syncing: false };
-const ARR = { consent_records: 'consents', family_members: 'members', baseline_assessments: 'baselines', visit_records: 'visits', referrals: 'referrals', families: 'families' };
-const PK = { consent_records: 'consent_id', family_members: 'family_member_id', baseline_assessments: 'baseline_id', visit_records: 'visit_id', referrals: 'referral_id', families: 'family_id' };
+const ARR = { competency_evidence: 'evidence', consent_records: 'consents', family_members: 'members', baseline_assessments: 'baselines', visit_records: 'visits', referrals: 'referrals', families: 'families' };
+const PK = { competency_evidence: 'evidence_id', consent_records: 'consent_id', family_members: 'family_member_id', baseline_assessments: 'baseline_id', visit_records: 'visit_id', referrals: 'referral_id', families: 'family_id' };
 const online = () => navigator.onLine;
 
 function setChip() {
@@ -84,7 +85,7 @@ window.addEventListener('offline', setChip);
 async function loadAll(force) {
   if (online()) {
     try {
-      const [families, members, consents, baselines, visits, reviews, referrals, forms] = await Promise.all([
+      const [families, members, consents, baselines, visits, reviews, referrals, forms, evidence] = await Promise.all([
         qAll(sb.from('families').select('family_id, institution_id, family_code, village_or_locality, phc_name, consent_status, enrolment_status, slot_no'), 'family_id'),
         qAll(sb.from('family_members').select('family_member_id, family_id, member_code, full_name, sex, date_of_birth, relationship_to_head, is_active'), 'family_member_id'),
         qAll(sb.from('consent_records').select('consent_id, family_id, consent_status, consent_date, recorded_at, notice_language, guardian_consent_minors, research_opt_in, consenter_name').order('recorded_at', { ascending: false }), 'consent_id'),
@@ -92,9 +93,10 @@ async function loadAll(force) {
         qAll(sb.from('visit_records').select('visit_id, family_id, visit_date, visit_number, status, observations, persons_contacted, health_education, referral_needed, next_followup_date'), 'visit_id'),
         qAll(sb.from('faculty_reviews').select('review_id, family_id, visit_id, baseline_id, decision, feedback, reviewed_at').order('reviewed_at', { ascending: false }), 'review_id'),
         qAll(sb.from('referrals').select('referral_id, family_id, referral_date, referral_reason, referred_to, status'), 'referral_id'),
-        qAll(sb.from('form_versions').select('form_version_id, institution_id, form_code, module_code, version_label, status, form_schema'), 'form_version_id')
+        qAll(sb.from('form_versions').select('form_version_id, institution_id, form_code, module_code, version_label, status, form_schema'), 'form_version_id'),
+        qAll(sb.from('competency_evidence').select('evidence_id, family_id, activity_type, activity_date, competency, phase, evidence_type, description, attachment, attachment_consent, reflection, status, mentor_rating, mentor_feedback, reviewed_at'), 'evidence_id').catch(() => [])
       ]);
-      S.data = { families, members, consents, baselines, visits, reviews, referrals, loadedAt: new Date().toISOString() };
+      S.data = { families, members, consents, baselines, visits, reviews, referrals, evidence, loadedAt: new Date().toISOString() };
       S.forms = buildForms(forms);
       await putEnc('cache', { me: S.me, student: S.student, data: S.data, forms: S.forms });
       return;
@@ -147,7 +149,7 @@ async function perform(op) {
   }
 }
 function applyLocal(op) {
-  const arr = S.data[ARR[op.table]];
+  const arr = (S.data[ARR[op.table]] ||= []);
   if (op.action === 'insert') arr.push({ ...op.values, _queued: op.queued || false });
   else arr.filter((r) => Object.entries(op.match).every(([k, v]) => r[k] === v)).forEach((r) => Object.assign(r, op.values));
   if (op.table === 'consent_records') { const f = S.data.families.find((x) => x.family_id === op.values.family_id); if (f) f.consent_status = op.values.consent_status; }
@@ -229,6 +231,20 @@ function field(q, scope, val, cls = '') {
     input = `<input type="number" inputmode="decimal" step="any" ${rng(q.options)} data-nm="${nm}" value="${esc(val ?? '')}">`;
   } else if (q.type === 'date') {
     input = `<input type="date" data-nm="${nm}" value="${esc(val || '')}">`;
+  } else if (q.type === 'sketch') {
+    input = `<div class="sketch" data-sketch="${esc(nm)}"><div class="row small" style="gap:6px;flex-wrap:wrap;margin-bottom:6px">
+      ${['#111', '#1e60c8', '#1a8a3a', '#c62828'].map((c, i) => `<button type="button" class="btn ghost sk-pen" data-c="${c}" style="padding:4px 10px;border-left:6px solid ${c}">${['Pen', 'Water', 'Green', 'Hazard'][i]}</button>`).join('')}
+      <select class="sk-lab" aria-label="Add a label"><option value="">Add label…</option>${['House', 'Road', 'Water point', 'Toilet', 'School', 'Anganwadi', 'PHC / HWC', 'Drain', 'Temple', 'Shop', 'Field', 'N (north)'].map((x) => `<option>${x}</option>`).join('')}</select>
+      <button type="button" class="btn ghost sk-undo" style="padding:4px 10px">Undo</button><button type="button" class="btn ghost sk-clear" style="padding:4px 10px">Clear</button></div>
+      <canvas width="640" height="440" style="width:100%;max-width:640px;aspect-ratio:640/440;border:1px solid #c9d3dd;border-radius:10px;background:#fff;touch-action:none"></canvas>
+      <div class="small muted">Draw with your finger. Choose a label, then tap the map to place it.</div>
+      <input type="hidden" data-nm="${nm}" value="${esc(val || '')}"></div>`;
+  } else if (q.type === 'diet') {
+    const rows = Array.isArray(val) ? val : [];
+    input = `<div class="diet" data-diet="${esc(nm)}"><div class="drows"></div>
+      <button type="button" class="btn ghost d-add" style="margin-top:6px">+ Add food item</button>
+      <div class="small muted" style="margin-top:4px">Raw (uncooked) weight in grams used by the family yesterday. ${esc(NUT.FOOD_TABLE_VERSION)}.</div>
+      <input type="hidden" data-nm="${nm}" data-json="1" value="${esc(JSON.stringify(rows))}"></div>`;
   } else if (q.type === 'geopoint') {
     input = `<div class="row"><button type="button" class="btn ghost" data-geo="${nm}">Use my location</button> <span class="small muted" data-geoout="${nm}">${esc(val || 'Not captured (optional)')}</span></div><input type="hidden" data-nm="${nm}" value="${esc(val || '')}">`;
   } else {
@@ -251,7 +267,7 @@ function readScope(root, scope) {
     if (radios.length) v = radios.find((r) => r.checked)?.value;
     else if (checks.length) { v = checks.filter((c) => c.checked).map((c) => c.value); if (!v.length) v = undefined; }
     else if (parts.length) { const s = parts[0].value, d = parts[1].value; v = s && d ? `${s}/${d}` : undefined; }
-    else if (one) { v = one.value; if (one.type === 'number' && v !== '') v = Number(v); if (v === '') v = undefined; }
+    else if (one) { v = one.value; if (one.dataset.json) { try { v = JSON.parse(v || '[]').filter((r) => r.f && Number(r.g) > 0); } catch { v = []; } if (!v.length) v = undefined; } else if (one.type === 'number' && v !== '') v = Number(v); if (v === '') v = undefined; }
     if (v !== undefined) out[code] = v;
   });
   return out;
@@ -273,10 +289,70 @@ function computeScope(root, scope, ctx) {
   return { ...a, ...calc };
 }
 
+function nutritionPass(root, answers, ctxOf) {
+  const r = R(); if (!r.nut_family) return;
+  const hh = answers.household || {}; const totals = NUT.familyTotals(hh[r.nut_register]);
+  const fmt = (o) => NUT.NUTRIENTS.map(([k, l, u]) => `${l} ${o[k]} ${u}`).join(' · ');
+  const has = totals.kcal > 0;
+  if (has) hh[r.nut_family] = totals;
+  $$(`[data-scope="household"] [data-calc="${r.nut_family}"]`, root).forEach((el) => (el.innerHTML = has ? `<strong>Family total yesterday:</strong> ${fmt(totals)}` : 'Add food items above'));
+  Object.keys(answers).filter((sc) => sc.startsWith('m:')).forEach((sc) => {
+    const a = answers[sc]; const ctx = ctxOf(sc, a);
+    const req = NUT.requirement({ age: ctx.age, sex: ctx.sex, activity: a[r.nut_activity], pregnant: a.WH03 === 'Pregnant', lactating: a.WH03 === 'Delivered in last 6 weeks' });
+    const res = has ? NUT.memberIntake(totals, a[r.nut_share], req) : null;
+    if (req) a[r.nut_req] = req;
+    if (res) a[r.nut_member] = { ...res.intake, ...(res.pct ? Object.fromEntries(Object.entries(res.pct).map(([k, v]) => [k + '_pct', v])) : {}) };
+    const st = NUT.nutritionStatus({ age: ctx.age, bmi: a[r.bmi], muac: a[r.muac] }); a[r.nut_status] = st;
+    const box = (code) => $$(`[data-scope="${CSS.escape(sc)}"] [data-calc="${code}"]`, root);
+    box(r.nut_req).forEach((el) => (el.innerHTML = req ? `Energy ${req.kcal} kcal · Protein ${req.protein} g · Calcium ${req.ca} mg · Iron ${req.fe} mg <span class="small muted">(${esc(NUT.REF_VERSION)})</span>` : 'Not calculated under 1 year'));
+    box(r.nut_member).forEach((el) => (el.innerHTML = res ? `${fmt(res.intake)}${res.pct ? `<br><strong>Adequacy:</strong> energy ${res.pct.kcal}% · protein ${res.pct.protein}% · calcium ${res.pct.ca}% · iron ${res.pct.fe}%${res.pct.kcal < 70 || res.pct.protein < 70 ? '<span class="flag">Below 70%: counsel</span>' : ''}` : ''}` : 'Needs family food list and this member\'s share'));
+    box(r.nut_status).forEach((el) => (el.textContent = st));
+  });
+}
+function wireSketch(root) {
+  $$('[data-sketch]', root).forEach((w) => {
+    const cv = $('canvas', w), ctx = cv.getContext('2d'), hid = $('input[type=hidden]', w); let color = '#111', drawing = false, label = '';
+    const hist = [];
+    const save = () => { hid.value = cv.toDataURL('image/png'); hid.dispatchEvent(new Event('change', { bubbles: true })); };
+    const snap = () => { hist.push(ctx.getImageData(0, 0, cv.width, cv.height)); if (hist.length > 20) hist.shift(); };
+    if (hid.value) { const im = new Image(); im.onload = () => ctx.drawImage(im, 0, 0); im.src = hid.value; }
+    const pt = (e) => { const b = cv.getBoundingClientRect(); return [(e.clientX - b.left) * cv.width / b.width, (e.clientY - b.top) * cv.height / b.height]; };
+    cv.addEventListener('pointerdown', (e) => {
+      e.preventDefault(); snap(); const [x, y] = pt(e);
+      if (label) { ctx.font = 'bold 22px sans-serif'; ctx.fillStyle = color; ctx.fillText(label, x, y); label = ''; $('.sk-lab', w).value = ''; save(); return; }
+      drawing = true; ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(x, y); cv.setPointerCapture(e.pointerId);
+    });
+    cv.addEventListener('pointermove', (e) => { if (!drawing) return; const [x, y] = pt(e); ctx.lineTo(x, y); ctx.stroke(); });
+    const end = () => { if (drawing) { drawing = false; save(); } };
+    cv.addEventListener('pointerup', end); cv.addEventListener('pointerleave', end);
+    $$('.sk-pen', w).forEach((b) => (b.onclick = () => (color = b.dataset.c)));
+    $('.sk-lab', w).onchange = (e) => (label = e.target.value);
+    $('.sk-undo', w).onclick = () => { const h = hist.pop(); if (h) { ctx.putImageData(h, 0, 0); save(); } };
+    $('.sk-clear', w).onclick = () => { if (!confirm('Clear the whole sketch?')) return; snap(); ctx.clearRect(0, 0, cv.width, cv.height); hid.value = ''; hid.dispatchEvent(new Event('change', { bubbles: true })); };
+  });
+}
+function wireDiet(root) {
+  $$('[data-diet]', root).forEach((w) => {
+    const hid = $('input[type=hidden]', w), box = $('.drows', w);
+    let rows; try { rows = JSON.parse(hid.value || '[]'); } catch { rows = []; }
+    if (!rows.length) rows = [{ f: '', g: '' }];
+    const opt = (sel) => `<option value="">Choose food…</option>${NUT.FOODS.map((f) => `<option value="${f.id}" ${f.id === sel ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}`;
+    const draw = () => {
+      box.innerHTML = rows.map((r, i) => `<div class="two" style="grid-template-columns:1fr 90px 36px;margin-bottom:6px"><select data-i="${i}" class="d-f">${opt(r.f)}</select><input data-i="${i}" class="d-g" type="number" inputmode="decimal" min="1" max="20000" placeholder="grams" value="${esc(r.g ?? '')}"><button type="button" class="btn ghost d-x" data-i="${i}" aria-label="Remove" style="padding:4px">×</button></div>`).join('');
+    };
+    const save = () => { hid.value = JSON.stringify(rows.filter((r) => r.f).map((r) => ({ f: r.f, g: Number(r.g) || 0 }))); hid.dispatchEvent(new Event('change', { bubbles: true })); };
+    draw();
+    box.addEventListener('change', (e) => { const i = +e.target.dataset.i; if (e.target.classList.contains('d-f')) rows[i].f = e.target.value; save(); });
+    box.addEventListener('input', (e) => { const i = +e.target.dataset.i; if (e.target.classList.contains('d-g')) { rows[i].g = e.target.value; save(); } });
+    box.addEventListener('click', (e) => { const b = e.target.closest('.d-x'); if (!b) return; rows.splice(+b.dataset.i, 1); if (!rows.length) rows.push({ f: '', g: '' }); draw(); save(); });
+    $('.d-add', w).onclick = () => { rows.push({ f: '', g: '' }); draw(); };
+  });
+}
 function refresh(root, ctxOf) {
   const scopes = [...new Set($$('[data-scope]', root).map((b) => b.dataset.scope))];
   const answers = {};
   scopes.forEach((sc) => { answers[sc] = computeScope(root, sc, ctxOf(sc, {})); });
+  nutritionPass(root, answers, ctxOf);
   scopes.forEach((sc) => {
     const ctx = ctxOf(sc, answers[sc]);
     $$(`[data-scope="${sc}"]`, root).forEach((box) => { box.hidden = !cond(box.dataset.show, ctx); });
@@ -286,6 +362,7 @@ function refresh(root, ctxOf) {
 
 function wireForm(root, ctxOf) {
   const go = () => refresh(root, ctxOf);
+  wireSketch(root); wireDiet(root);
   root.addEventListener('change', (e) => {
     const t = e.target;
     if (t.type === 'checkbox' && t.checked) { // "None" is exclusive
@@ -346,6 +423,9 @@ function viewHome() {
       return `<div class="card" style="margin-top:14px"><strong>My FAP report</strong>
       <div class="small muted" style="margin:4px 0 10px">${v >= n ? 'All family baselines are verified. Your final report is ready.' : `Interim report: ${v} of ${n} family baselines verified by your mentor. It becomes final when all are verified.`} Made automatically from your records; family members appear by code only.</div>
       <button class="btn full" id="myReport">Download my report (Word)</button></div>`; })() : ''}
+    ${(() => { const ev = S.data.evidence || []; const ver = ev.filter((e) => e.status === 'VERIFIED').length, ret = ev.filter((e) => e.status === 'RETURNED' || e.status === 'NEEDS_REPEAT').length;
+      return `<a class="card" href="#/logbook" style="display:block;margin-top:14px;text-decoration:none;color:inherit"><strong>My competency logbook</strong>
+      <div class="small muted" style="margin-top:4px">${ev.length} entr${ev.length === 1 ? 'y' : 'ies'} · ${ver} verified by mentor${ret ? ` · <span style="color:#b3261e">${ret} to correct</span>` : ''}</div></a>`; })()}
     <p class="small muted" style="margin-top:16px">Data last refreshed: ${fmtDate(S.data.loadedAt)} · v${esc(APP_VERSION)} · <a href="#/sync">Sync and settings</a></p>`;
 }
 
@@ -371,7 +451,7 @@ async function downloadMyReport(btn) {
     const cur = asg.filter((a) => a.effective_from <= today && (!a.effective_to || a.effective_to >= today)).pop() || asg.pop();
     const D = { institution: inst[0] || {}, student: { name: S.me.full_name, roll_number: st[0]?.roll_number, current_phase: st[0]?.current_phase, batch_name: st[0]?.academic_batches?.batch_name },
       mentor: cur ? { name: cur.faculty?.app_users?.full_name, designation: cur.faculty?.designation } : null,
-      families: S.data.families, members: S.data.members, baselines: S.data.baselines, visits: S.data.visits, referrals: S.data.referrals, consents: S.data.consents };
+      families: S.data.families, members: S.data.members, baselines: S.data.baselines, visits: S.data.visits, referrals: S.data.referrals, consents: S.data.consents, evidence: S.data.evidence || [] };
     const meta = { place: `${D.student.name} (${D.student.roll_number || ''}), ${D.institution.institution_name || ''}, ${D.institution.district || ''}, ${D.institution.state || ''}.`, source: `Source: FAP Digital Health, data as of ${fmtDate(today)}.` };
     const P = C.computePrevalence(D, today), T = C.computeTrends(D, today);
     const figs = [[C.svgPyramid(P, meta), 'Age and sex of members of my adopted families'], [C.svgPrevalenceBars(P, meta), 'Health problems found (with 95% CI)'],
@@ -502,7 +582,7 @@ function viewBaseline(id) {
   const mq = Q.filter((q) => q.level === 'Member' && !isWrap(q) && (S.forms.v2 || !SKIP_IN_BASELINE.has(q.code)));
   const ret = S.data.reviews.find((r) => r.baseline_id === b?.baseline_id && r.decision === 'RETURNED');
   if (!editable) {
-    const show = (o) => Object.entries(o || {}).filter(([k]) => k !== 'std' && k !== 'v').map(([k, v]) => `<tr><td class="small muted">${esc(k)}</td><td>${esc((Q.find((q) => q.code === k) || S.forms.modules.flatMap((m) => m.questions).find((q) => q.code === k) || {}).label || k)}</td><td>${esc(Array.isArray(v) ? v.join(', ') : v)}</td></tr>`).join('');
+    const show = (o) => Object.entries(o || {}).filter(([k]) => k !== 'std' && k !== 'v').map(([k, v]) => [k, typeof v === 'string' && v.startsWith('data:image/') ? '[sketch saved]' : Array.isArray(v) && v.length && typeof v[0] === 'object' ? v.map((r) => `${(NUT.FOODS.find((f) => f.id === r.f) || {}).name || r.f} ${r.g} g`) : v && typeof v === 'object' && !Array.isArray(v) ? Object.entries(v).map(([a, b]) => `${a}: ${b}`) : v]).map(([k, v]) => `<tr><td class="small muted">${esc(k)}</td><td>${esc((Q.find((q) => q.code === k) || S.forms.modules.flatMap((m) => m.questions).find((q) => q.code === k) || {}).label || k)}</td><td>${esc(Array.isArray(v) ? v.join(', ') : v)}</td></tr>`).join('');
     app.innerHTML = `<div class="note info">${badge(b.status)} This baseline is ${b.status === 'VERIFIED' ? 'verified by your mentor' : 'with your mentor for review'} and cannot be edited.</div>
       <h2>Household</h2><div class="card"><table>${show(data.household)}</table></div>
       ${Object.entries(data.members || {}).map(([k, v]) => `<h2>Member ${esc(k)}</h2><div class="card"><table>${show(v)}</table></div>`).join('')}
@@ -678,6 +758,74 @@ start();
 }
 
 // ---------------- router and start ----------------
+
+// ---------------- competency logbook (ST01 to ST08) ----------------
+const COMPETENCIES = [
+  ['FAP-C1', 'Family profile, history and examination of family members'], ['FAP-C2', 'Mobilize for screening camps; coordinate check-up / treatment'],
+  ['FAP-C3', 'Follow up treatment, vaccination and remedial measures'], ['FAP-C4', 'Health promotion, environment protection and sustenance activities'],
+  ['FAP-C5', 'Counsel the family; analyse and report its health trajectory'], ['FAP-C6', 'Work in the health team; intersectoral action (Phase 3)']];
+const ACTIVITIES = ['Family interview', 'Clinical examination', 'Screening mobilization', 'Counselling', 'Health education', 'Environment action', 'Referral coordination', 'Intersectoral / health team activity', 'Short-term action project', 'Other'];
+const EVTYPES = ['Observed interaction', 'Case presentation', 'OSPE', 'Logbook entry', 'Counselling record', 'Community activity', 'Reflection', 'Report'];
+function viewLogbook() {
+  head('Competency logbook', S.me.full_name, '#/');
+  const ev = (S.data.evidence || []).slice().sort((a, b) => String(b.activity_date).localeCompare(String(a.activity_date)));
+  const count = (c, st) => ev.filter((e) => e.competency === c && (!st || e.status === st)).length;
+  app.innerHTML = `<p class="muted">Record each FAP activity with its evidence. Your mentor verifies it and gives a rating (B below, M meets, E exceeds expectations). Filling the questionnaire alone does not count as a competency.</p>
+    <a class="btn full" href="#/evidence/new">+ Add logbook entry</a>
+    <div class="card" style="margin-top:12px"><table><thead><tr><th>Competency</th><th>Entries</th><th>Verified</th></tr></thead><tbody>
+      ${COMPETENCIES.map(([c, t]) => `<tr><td><strong>${c}</strong><div class="small muted">${esc(t)}</div></td><td>${count(c)}</td><td>${count(c, 'VERIFIED')}</td></tr>`).join('')}</tbody></table></div>
+    <div class="list" style="margin-top:12px">${ev.map((e) => `<a class="item" href="#/evidence/${e.evidence_id}"><div class="grow"><strong>${esc(e.competency)}</strong> · ${esc(e.activity_type)} <span class="small muted">${fmtDate(e.activity_date)}</span>
+      ${e.mentor_rating ? `<div class="small">Rating: <strong>${esc(e.mentor_rating)}</strong></div>` : ''}${e.mentor_feedback && e.status !== 'VERIFIED' ? `<div class="small" style="color:#b3261e">${esc(e.mentor_feedback)}</div>` : ''}</div>${badge(e._queued ? 'QUEUED' : e.status)}</a>`).join('') || '<div class="card muted">No entries yet.</div>'}</div>`;
+}
+async function shrinkPhoto(file) {
+  const img = await createImageBitmap(file); const k = Math.min(1, 1024 / Math.max(img.width, img.height));
+  const c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k); c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  let q = 0.7, out = c.toDataURL('image/jpeg', q); while (out.length > 300000 && q > 0.3) { q -= 0.1; out = c.toDataURL('image/jpeg', q); }
+  return out;
+}
+function viewEvidence(id) {
+  const e = id && id !== 'new' ? (S.data.evidence || []).find((x) => x.evidence_id === id) : null;
+  const editable = !e || ['DRAFT', 'RETURNED', 'NEEDS_REPEAT'].includes(e.status);
+  head(e ? 'Logbook entry' : 'New logbook entry', e ? `${e.competency} · ${fmtDate(e.activity_date)}` : S.me.full_name, '#/logbook');
+  const sel = (id2, list, v) => `<select id="${id2}">${list.map((x) => { const [val, lab] = Array.isArray(x) ? x : [x, x]; return `<option value="${esc(val)}" ${val === v ? 'selected' : ''}>${esc(lab)}</option>`; }).join('')}</select>`;
+  if (!editable) {
+    app.innerHTML = `<div class="note info">${badge(e.status)} ${e.status === 'VERIFIED' ? `Verified by your mentor. Rating: <strong>${esc(e.mentor_rating || '-')}</strong>` : 'With your mentor for review.'}</div>
+      <div class="card" style="margin-top:12px"><table>
+      ${[['ST01 Activity', e.activity_type], ['Date', fmtDate(e.activity_date)], ['ST02 Competency', e.competency], ['Phase', e.phase], ['ST03 Evidence type', e.evidence_type], ['ST04 Description', e.description], ['ST05 Reflection', e.reflection], ['ST06 Mentor feedback', e.mentor_feedback]].map(([a, b]) => `<tr><td class="small muted">${a}</td><td>${esc(b || '-')}</td></tr>`).join('')}</table>
+      ${e.attachment ? `<img src="${esc(e.attachment)}" alt="Evidence photo" style="max-width:100%;border-radius:8px;margin-top:8px">` : ''}</div>`;
+    return;
+  }
+  const fams = [['', 'Not specific to one family'], ...S.data.families.map((f) => [f.family_id, f.family_code])];
+  app.innerHTML = `${e?.mentor_feedback ? `<div class="note" style="margin-bottom:12px"><strong>Mentor's note:</strong> ${esc(e.mentor_feedback)}</div>` : ''}
+    <form id="ef" class="card">
+      <label class="lbl">ST01 Activity performed</label>${sel('ea', ACTIVITIES, e?.activity_type)}
+      <label class="lbl">Date of activity</label><input id="ed" type="date" required max="${today()}" value="${esc(e?.activity_date || today())}">
+      <label class="lbl">Family</label>${sel('efm', fams, e?.family_id || '')}
+      <label class="lbl">ST02 NMC FAP competency</label>${sel('ec', COMPETENCIES.map(([c, t]) => [c, `${c}: ${t}`]), e?.competency)}
+      <label class="lbl">Phase</label>${sel('ep', ['Phase 1', 'Phase 2', 'Phase 3'], e?.phase || ({ 'Phase I': 'Phase 1', 'Phase II': 'Phase 2', 'Phase III': 'Phase 3' }[S.student?.current_phase] || 'Phase 1'))}
+      <label class="lbl">ST03 Evidence type</label>${sel('et', EVTYPES, e?.evidence_type)}
+      <label class="lbl" for="eds">ST04 What you did (evidence description)</label><textarea id="eds" rows="3" required>${esc(e?.description || '')}</textarea>
+      <label class="lbl">ST04 Photo (optional, only if needed and the family agreed)</label><input id="eph" type="file" accept="image/*" capture="environment">
+      <div id="epv">${e?.attachment ? `<img src="${esc(e.attachment)}" alt="" style="max-width:160px;border-radius:8px;margin-top:6px">` : ''}</div>
+      <label class="chk"><input type="checkbox" id="ecn" ${e?.attachment_consent ? 'checked' : ''}><span>The family agreed to this photo. No unrelated person or ID number is visible.</span></label>
+      <label class="lbl" for="er">ST05 Reflection: what I learned, the challenge, my next action</label><textarea id="er" rows="3" required>${esc(e?.reflection || '')}</textarea>
+      <div class="bar"><button class="btn ghost" id="edraft">Save draft</button><button class="btn" id="esub">Submit to mentor</button></div></form>`;
+  let photo = e?.attachment || null;
+  $('#eph').onchange = async (ev) => { const f = ev.target.files[0]; if (!f) return; try { photo = await shrinkPhoto(f); $('#epv').innerHTML = `<img src="${photo}" alt="" style="max-width:160px;border-radius:8px;margin-top:6px"> <button type="button" class="btn ghost" id="erm">Remove photo</button>`; $('#erm').onclick = () => { photo = null; $('#epv').innerHTML = ''; }; } catch { toast('Could not read the photo'); } };
+  const save = async (status) => {
+    if (status === 'SUBMITTED' && (!$('#eds').value.trim() || !$('#er').value.trim())) return toast('Write the description and your reflection');
+    if (photo && !$('#ecn').checked) return toast('Tick the consent box, or remove the photo');
+    const values = { activity_type: $('#ea').value, activity_date: $('#ed').value, family_id: $('#efm').value || null, competency: $('#ec').value, phase: $('#ep').value, evidence_type: $('#et').value,
+      description: $('#eds').value.trim(), reflection: $('#er').value.trim(), attachment: photo, attachment_consent: !!photo && $('#ecn').checked, status, mentor_rating: null, reviewed_by: null };
+    try {
+      const r = e ? await write({ table: 'competency_evidence', action: 'update', match: { evidence_id: e.evidence_id }, values })
+        : await write({ table: 'competency_evidence', action: 'insert', values: { evidence_id: uuid(), institution_id: S.me.institution_id, student_id: S.student.student_id, created_by: S.me.user_id, ...values } });
+      toast(r === 'queued' ? 'Saved on phone; will upload when online' : status === 'SUBMITTED' ? 'Submitted to your mentor' : 'Draft saved'); location.hash = '#/logbook';
+    } catch (err) { toast(friendly(err)); }
+  };
+  $('#edraft').onclick = (ev) => { ev.preventDefault(); save('DRAFT'); };
+  $('#esub').onclick = (ev) => { ev.preventDefault(); save('SUBMITTED'); };
+}
 function route() {
   if (!S.data) return;
   const [page, id] = location.hash.replace(/^#\/?/, '').split('/');
@@ -690,6 +838,8 @@ function route() {
     if (page === 'visit') return viewVisit(id);
     if (page === 'visitview') return viewVisitView(id);
     if (page === 'sync') return viewSync();
+    if (page === 'logbook') return viewLogbook();
+    if (page === 'evidence') return viewEvidence(id);
     return viewHome();
   } catch (e) { console.error(e); app.innerHTML = `<div class="note">Something went wrong: ${esc(e.message)}</div>`; }
 }
