@@ -2,8 +2,8 @@
 // Plain JavaScript, no build step. Talks to Supabase; the database access rules (RLS)
 // decide what each signed-in person can see. This file never bypasses them.
 import { createClient } from './vendor/supabase-2.119.2.js';
-import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.5';
-import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.5';
+import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.6';
+import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.6';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, storageKey: 'fap-portal-auth' }
@@ -267,7 +267,7 @@ async function viewFamily(id) {
       const label = (o) => (o && typeof o === 'object' && !Array.isArray(o) ? Object.fromEntries(Object.entries(o).map(([k, v]) => [S.labels[k] ? `${k} ${S.labels[k]}` : k, label(v)])) : o);
       const out = { exported_on: localISO(), college: S.institution?.institution_name, family: fam[0], members: mem2, consent: cons2,
         baseline: bls.map((b) => ({ ...b, assessment_data: label(b.assessment_data) })), visits: vis.map((v) => ({ ...v, observations: label(v.observations) })), referrals: rfs,
-        note: 'Personal data held by PMRIMS under the Family Adoption Programme. Provided on request under the DPDP Act, 2023.' };
+        note: `Personal data held by ${S.institution?.institution_name || 'the college'} under the Family Adoption Programme. Provided on request under the DPDP Act, 2023.` };
       await q(sb.rpc('fap_log_request', { p_family: id, p_type: 'ACCESS', p_details: 'Family data exported from portal' }));
       saveBlob(new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' }), `FAP_family_${f.family_code}_${localISO()}.json`);
       toast('Exported and recorded');
@@ -381,7 +381,7 @@ async function reportData() {
 async function downloadReport(kind, studentId) {
   toast('Preparing the Word report…');
   try {
-    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.5')]);
+    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.6')]);
     let D = await reportData();
     const st = D.students.find((s) => s.student_id === studentId);
     let extra = {};
@@ -418,7 +418,7 @@ app.addEventListener('click', (e) => {
 async function viewOverview() {
   setTab('overview');
   if (!isHOD() && !S.roles.includes('AUDITOR')) { location.hash = '#/'; return; }
-  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.5')]);
+  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.6')]);
   const A = R.computeAnalytics(D);
   const tbl = (rows) => `<div class="tbox"><table><thead><tr><th>Indicator</th><th>Number (%)</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td><strong>${esc(v)}</strong></td></tr>`).join('')}</tbody></table></div>`;
   app.innerHTML = `<div class="row"><div style="flex:1"><h1>College overview</h1><p class="muted">${esc(D.institution.institution_name || '')} · ${esc(D.institution.district || '-')}, ${esc(D.institution.state || '-')} · as of ${fmtDate(new Date())}</p></div>
@@ -448,7 +448,7 @@ const svgToPng = (svg, scale = 2) => new Promise((res, rej) => {
 const saveBlob = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); };
 const chartMeta = (D) => ({ place: `${D.institution.institution_name || ''}, ${D.institution.district || '-'}, ${D.institution.state || '-'}.`, source: `Source: FAP Digital Health, data as of ${fmtDate(new Date())}.` });
 async function analyticsPack() {
-  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.5')]);
+  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.6')]);
   const today = localISO(), f = S.af || {};
   const D = C.filterData(D0, f, today), fl = C.filterLabel(D0, f);
   const meta = chartMeta(D0); if (fl) meta.place = meta.place + ' ' + fl;
