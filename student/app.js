@@ -92,7 +92,7 @@ async function loadAll(force) {
         qAll(sb.from('visit_records').select('visit_id, family_id, visit_date, visit_number, status, observations, persons_contacted, health_education, referral_needed, next_followup_date'), 'visit_id'),
         qAll(sb.from('faculty_reviews').select('review_id, family_id, visit_id, baseline_id, decision, feedback, reviewed_at').order('reviewed_at', { ascending: false }), 'review_id'),
         qAll(sb.from('referrals').select('referral_id, family_id, referral_date, referral_reason, referred_to, status'), 'referral_id'),
-        qAll(sb.from('form_versions').select('form_version_id, form_code, module_code, version_label, status, form_schema'), 'form_version_id')
+        qAll(sb.from('form_versions').select('form_version_id, institution_id, form_code, module_code, version_label, status, form_schema'), 'form_version_id')
       ]);
       S.data = { families, members, consents, baselines, visits, reviews, referrals, loadedAt: new Date().toISOString() };
       S.forms = buildForms(forms);
@@ -105,12 +105,36 @@ async function loadAll(force) {
   Object.assign(S, { me: S.me || c.me, student: S.student || c.student, data: c.data, forms: c.forms });
 }
 
-function buildForms(rows) {
+// v1 forms have fixed codes; v2 forms (BIMSR v2.1) name the job of a field in q.role.
+const V1ROLE = { bp1: 'C01', bp2: 'C02', bp_avg: 'C03', wt: 'C04', ht: 'C05', bmi: 'C06', marital: 'M06', relation: 'M03', problems: 'E01', health_ed: 'E02', ref_flag: 'E03', ref_place: 'E04' };
+const V1FROLE = { visit_date: 'F01', members_met: 'F02', bp_recheck: 'F07', wt_recheck: 'F08', ref_status: 'F09', health_ed: 'F11', ref_flag: 'F13', next_date: 'F14' };
+function roleMap(qs, v1) { const r = { ...v1 }; (qs || []).forEach((q) => { if (q.role) r[q.role] = q.code; }); return r; }
+function buildForms(rows0) {
+  const own = rows0.filter((r) => r.institution_id); // a college with its own approved forms uses only those
+  const rows = own.length ? own : rows0.filter((r) => !r.institution_id);
   const pick = (code, mod) => rows.filter((r) => r.form_code === code && (r.module_code || null) === (mod || null)).sort((a, b) => (a.status === 'ACTIVE' ? -1 : 1))[0];
   const B = pick('BASELINE'), F = pick('FOLLOWUP');
   const modules = rows.filter((r) => r.form_code === 'MODULE').map((r) => ({ code: r.module_code, title: r.form_schema.title, questions: r.form_schema.questions }));
-  return { baselineId: B?.form_version_id, baseline: B?.form_schema.questions || [], followupId: F?.form_version_id, followup: F?.form_schema.questions || [], modules };
+  const v2 = B?.form_schema?.engine === 2;
+  const allQ = (B?.form_schema.questions || []).concat(modules.flatMap((m) => m.questions));
+  return { baselineId: B?.form_version_id, baseline: B?.form_schema.questions || [], followupId: F?.form_version_id, followup: F?.form_schema.questions || [], modules, v2,
+    R: v2 ? roleMap(allQ, {}) : { ...V1ROLE }, FR: F?.form_schema?.engine === 2 ? roleMap(F.form_schema.questions, {}) : { ...V1FROLE } };
 }
+const R = () => S.forms.R || V1ROLE;
+const FR = () => S.forms.FR || V1FROLE;
+const isWrap = (q) => (q.part ? q.part === 'wrap_up' : String(q.section || '').startsWith('E'));
+// standard (v1-equivalent) block saved with v2 answers so analytics and reports keep working
+function stdOf(qs, ans) {
+  const out = {};
+  qs.forEach((q) => {
+    if (!q.as || ans[q.code] === undefined) return;
+    const v = ans[q.code];
+    if (q.as_multi) { const cur = Array.isArray(out[q.as]) ? out[q.as].filter((x) => x !== 'None') : []; const add = q.as_multi[v] || []; const all = [...new Set(cur.concat(add))]; out[q.as] = all.length ? all : ['None']; }
+    else out[q.as] = q.as_map ? (q.as_map[v] ?? v) : v;
+  });
+  return out;
+}
+const viewStd = (ad) => (ad?.v === 2 ? (ad.std || {}) : ad || {});
 
 // ---------------- writes: online first, queue when offline ----------------
 async function perform(op) {
@@ -162,10 +186,10 @@ function atom(a, ctx) {
   if ((m = a.match(/^age < (\d+)$/))) return ctx.age !== null && ctx.age < +m[1];
   if ((m = a.match(/^age (\d+)-(\d+)$/))) return ctx.age !== null && ctx.age >= +m[1] && ctx.age <= +m[2];
   if ((m = a.match(/^sex = (\w+)$/))) return (ctx.sex || '').toLowerCase() === m[1].toLowerCase();
-  if ((m = a.match(/^marital status not (\w+)$/))) return !!val('M06') && val('M06') !== m[1];
-  if ((m = a.match(/^([A-Z]\d+) includes (\w+)$/))) { const want = m[2] === 'TB' ? 'Tuberculosis' : m[2]; const v = val(m[1]); return Array.isArray(v) && v.includes(want); }
-  if ((m = a.match(/^([A-Z]\d+) not (.+)$/))) { const v = val(m[1]); if (Array.isArray(v)) return v.length > 0 && !v.includes(m[2]); return !!v && v !== m[2]; }
-  if ((m = a.match(/^([A-Z]\d+) = (.+)$/))) { const v = val(m[1]); return Array.isArray(v) ? v.includes(m[2]) : v === m[2]; }
+  if ((m = a.match(/^marital status not (\w+)$/))) { const mc = R().marital || 'M06'; return !!val(mc) && val(mc) !== m[1]; }
+  if ((m = a.match(/^([A-Z]+\d+[a-z]?) includes (.+)$/))) { const want = m[2] === 'TB' ? 'Tuberculosis' : m[2]; const v = val(m[1]); return Array.isArray(v) && v.includes(want); }
+  if ((m = a.match(/^([A-Z]+\d+[a-z]?) not (.+)$/))) { const v = val(m[1]); if (Array.isArray(v)) return v.length > 0 && !v.includes(m[2]); return !!v && v !== m[2]; }
+  if ((m = a.match(/^([A-Z]+\d+[a-z]?) = (.+)$/))) { const v = val(m[1]); return Array.isArray(v) ? v.includes(m[2]) : v === m[2]; }
   return true; // unknown rule: show the question rather than hide it
 }
 function cond(expr, ctx) {
@@ -235,14 +259,15 @@ function readScope(root, scope) {
 
 function computeScope(root, scope, ctx) {
   const a = readScope(root, scope);
-  const bp = ['C01', 'C02'].map((c) => a[c]).filter(Boolean).map((x) => x.split('/').map(Number));
+  const r = R();
+  const bp = [r.bp1, r.bp2].map((c) => a[c]).filter(Boolean).map((x) => x.split('/').map(Number));
   const calc = {};
-  if (bp.length) { const s = Math.round(bp.reduce((p, x) => p + x[0], 0) / bp.length), d = Math.round(bp.reduce((p, x) => p + x[1], 0) / bp.length); calc.C03 = `${s}/${d}`; }
-  if (a.C04 && a.C05 && (ctx.age ?? 0) >= 18) calc.C06 = Math.round((a.C04 / Math.pow(a.C05 / 100, 2)) * 10) / 10;
+  if (bp.length) { const s = Math.round(bp.reduce((p, x) => p + x[0], 0) / bp.length), d = Math.round(bp.reduce((p, x) => p + x[1], 0) / bp.length); calc[r.bp_avg] = `${s}/${d}`; }
+  if (a[r.wt] && a[r.ht] && (ctx.age ?? 0) >= 18) calc[r.bmi] = Math.round((a[r.wt] / Math.pow(a[r.ht] / 100, 2)) * 10) / 10;
   $$(`[data-scope="${scope}"] [data-calc]`, root).forEach((el) => {
     const c = el.dataset.calc;
-    if (c === 'C03') el.innerHTML = calc.C03 ? `Average: <strong>${calc.C03} mm Hg</strong>${(() => { const [s, d] = calc.C03.split('/').map(Number); return s >= 140 || d >= 90 ? '<span class="flag">High BP: refer</span>' : ''; })()}` : 'Enter readings above';
-    else if (c === 'C06') el.innerHTML = calc.C06 ? `BMI: <strong>${calc.C06}</strong>${calc.C06 >= 23 ? '<span class="flag">Above Asian cut-off</span>' : ''}` : 'Enter weight and height';
+    if (c === r.bp_avg) el.innerHTML = calc[c] ? `Average: <strong>${calc[c]} mm Hg</strong>${(() => { const [s, d] = calc[c].split('/').map(Number); return s >= 140 || d >= 90 ? '<span class="flag">High BP: refer</span>' : ''; })()}` : 'Enter readings above';
+    else if (c === r.bmi) el.innerHTML = calc[c] ? `BMI: <strong>${calc[c]}</strong>${calc[c] >= 23 ? '<span class="flag">Above Asian cut-off</span>' : ''}` : 'Enter weight and height';
     else el.textContent = 'Calculated later from your answers';
   });
   return { ...a, ...calc };
@@ -438,7 +463,7 @@ function viewConsent(id) {
 function viewMember(id) {
   const f = famOf(id); head('Add member', f.family_code, `#/family/${id}`);
   const next = 'M' + (Math.max(0, ...S.data.members.filter((m) => m.family_id === id).map((m) => +m.member_code.slice(1) || 0)) + 1);
-  const rel = S.forms.baseline.find((q) => q.code === 'M03');
+  const rel = S.forms.baseline.find((q) => q.code === (V1ROLE.relation)) || { options: 'Self; Wife; Husband; Son; Daughter; Grandson; Granddaughter; Son-in-law; Daughter-in-law; Father; Mother; Brother; Sister; Other' };
   app.innerHTML = `<p class="muted">New member code: <strong>${next}</strong>. The name is kept private; screens show the code.</p>
     <form id="mf">
       <label class="lbl" for="mn">Full name</label><input id="mn" required autocomplete="off">
@@ -472,12 +497,12 @@ function viewBaseline(id) {
   const data = b?.assessment_data || { household: {}, members: {}, wrap_up: {} };
   const editable = !b || b.status === 'DRAFT' || b.status === 'RETURNED';
   const Q = S.forms.baseline;
-  const hh = Q.filter((q) => q.level === 'Household' && !q.section.startsWith('E'));
-  const wr = Q.filter((q) => q.section.startsWith('E'));
-  const mq = Q.filter((q) => q.level === 'Member' && !SKIP_IN_BASELINE.has(q.code));
+  const hh = Q.filter((q) => q.level === 'Household' && !isWrap(q));
+  const wr = Q.filter((q) => isWrap(q));
+  const mq = Q.filter((q) => q.level === 'Member' && !isWrap(q) && (S.forms.v2 || !SKIP_IN_BASELINE.has(q.code)));
   const ret = S.data.reviews.find((r) => r.baseline_id === b?.baseline_id && r.decision === 'RETURNED');
   if (!editable) {
-    const show = (o) => Object.entries(o || {}).map(([k, v]) => `<tr><td class="small muted">${esc(k)}</td><td>${esc((Q.find((q) => q.code === k) || S.forms.modules.flatMap((m) => m.questions).find((q) => q.code === k) || {}).label || k)}</td><td>${esc(Array.isArray(v) ? v.join(', ') : v)}</td></tr>`).join('');
+    const show = (o) => Object.entries(o || {}).filter(([k]) => k !== 'std' && k !== 'v').map(([k, v]) => `<tr><td class="small muted">${esc(k)}</td><td>${esc((Q.find((q) => q.code === k) || S.forms.modules.flatMap((m) => m.questions).find((q) => q.code === k) || {}).label || k)}</td><td>${esc(Array.isArray(v) ? v.join(', ') : v)}</td></tr>`).join('');
     app.innerHTML = `<div class="note info">${badge(b.status)} This baseline is ${b.status === 'VERIFIED' ? 'verified by your mentor' : 'with your mentor for review'} and cannot be edited.</div>
       <h2>Household</h2><div class="card"><table>${show(data.household)}</table></div>
       ${Object.entries(data.members || {}).map(([k, v]) => `<h2>Member ${esc(k)}</h2><div class="card"><table>${show(v)}</table></div>`).join('')}
@@ -505,7 +530,13 @@ function viewBaseline(id) {
     const ans = refresh(root, ctxOf);
     const visibleOnly = (sc) => { const o = ans[sc] || {}; $$(`[data-scope="${sc}"]`, root).forEach((bx) => { if (bx.hidden) delete o[bx.dataset.q]; }); return o; };
     const members = {}; mem.forEach((m) => (members[m.member_code] = visibleOnly(`m:${m.member_code}`)));
-    return { household: visibleOnly('household'), members, wrap_up: visibleOnly('wrap_up') };
+    const out = { household: visibleOnly('household'), members, wrap_up: visibleOnly('wrap_up') };
+    if (S.forms.v2) {
+      const allQ = Q.concat(S.forms.modules.flatMap((x) => x.questions));
+      out.v = 2;
+      out.std = { household: stdOf(allQ, out.household), members: Object.fromEntries(Object.entries(members).map(([k, v]) => [k, stdOf(allQ, v)])), wrap_up: stdOf(allQ, out.wrap_up) };
+    }
+    return out;
   };
   const save = async (status) => {
     if (status === 'SUBMITTED' && !validate(root)) return;
@@ -514,8 +545,9 @@ function viewBaseline(id) {
       let r;
       if (!b) r = await write({ table: 'baseline_assessments', action: 'insert', values: { baseline_id: uuid(), institution_id: f.institution_id, family_id: id, assessment_date: today(), status, assessment_data: d, form_version_id: S.forms.baselineId, submitted_by: S.me.user_id } });
       else r = await write({ table: 'baseline_assessments', action: 'update', match: { baseline_id: b.baseline_id }, values: { status, assessment_data: d, submitted_by: S.me.user_id } });
-      if (status === 'SUBMITTED' && d.wrap_up.E03 === 'Yes' && b?.status !== 'RETURNED') {
-        await write({ table: 'referrals', action: 'insert', values: { referral_id: uuid(), institution_id: f.institution_id, family_id: id, referral_date: today(), referral_reason: String(d.wrap_up.E01 || 'See baseline').slice(0, 500), referred_to: d.wrap_up.E04 || null, status: 'OPEN', created_by: S.me.user_id } });
+      const r0 = R();
+      if (status === 'SUBMITTED' && d.wrap_up[r0.ref_flag] === 'Yes' && b?.status !== 'RETURNED') {
+        await write({ table: 'referrals', action: 'insert', values: { referral_id: uuid(), institution_id: f.institution_id, family_id: id, referral_date: today(), referral_reason: String(d.wrap_up[r0.problems] || 'See baseline').slice(0, 500), referred_to: d.wrap_up[r0.ref_place] || null, status: 'OPEN', created_by: S.me.user_id } });
       }
       toast(r === 'queued' ? 'Saved on phone; will upload when online' : status === 'SUBMITTED' ? 'Submitted to your mentor' : 'Draft saved');
       location.hash = `#/family/${id}`;
@@ -530,20 +562,22 @@ function viewVisit(id, existing) {
   head(existing ? `Correct visit ${existing.visit_number}` : 'Follow-up visit', f.family_code, `#/family/${id}`);
   const Q = S.forms.followup; const prev = existing?.observations || {};
   const openRef = S.data.referrals.find((r) => r.family_id === id && (r.status === 'OPEN' || r.status === 'IN_PROGRESS'));
-  const bm = b?.assessment_data?.members || {};
+  const bm = viewStd(b?.assessment_data).members || {};
+  const fr = FR(); const rl = (q) => Object.keys(fr).find((k) => fr[k] === q.code);
   const needBP = mem.filter((m) => { const a = bm[m.member_code] || {}; const [s, d] = String(a.C03 || '').split('/').map(Number); return (a.M13 || []).includes('Hypertension') || s >= 140 || d >= 90; });
   const needWt = mem.filter((m) => (ageY(m.date_of_birth) ?? 99) < 5 || (bm[m.member_code] || {}).W04 === 'Yes');
-  const e02 = (S.forms.baseline.find((q) => q.code === 'E02') || {}).options;
+  const e02 = (S.forms.baseline.find((q) => q.code === R().health_ed) || {}).options;
   let html = '';
   Q.forEach((q) => {
-    if (q.code === 'F07') { html += needBP.length ? `<div class="sec-h">BP re-check (members with high BP or hypertension)</div>` + needBP.map((m) => field({ ...q, code: 'F07', label: `${m.member_code}: ${q.label}`, show_if: '' }, `f07:${m.member_code}`, prev.F07?.[m.member_code])).join('') : ''; return; }
-    if (q.code === 'F08') { html += needWt.length ? `<div class="sec-h">Weight re-check (under-5 or pregnant)</div>` + needWt.map((m) => field({ ...q, label: `${m.member_code}: ${q.label} (kg)`, show_if: '' }, `f08:${m.member_code}`, prev.F08?.[m.member_code])).join('') : ''; return; }
-    if (q.code === 'F09' && !openRef) return;
+    const role = rl(q);
+    if (role === 'bp_recheck') { html += needBP.length ? `<div class="sec-h">BP re-check (members with high BP or hypertension)</div>` + needBP.map((m) => field({ ...q, label: `${m.member_code}: ${q.label}`, show_if: '' }, `f07:${m.member_code}`, prev[q.code]?.[m.member_code])).join('') : ''; return; }
+    if (role === 'wt_recheck') { html += needWt.length ? `<div class="sec-h">Weight re-check (under-5 or pregnant)</div>` + needWt.map((m) => field({ ...q, label: `${m.member_code}: ${q.label} (kg)`, show_if: '' }, `f08:${m.member_code}`, prev[q.code]?.[m.member_code])).join('') : ''; return; }
+    if (role === 'ref_status' && !openRef) return;
     let qq = { ...q };
-    if (q.code === 'F02') qq = { ...q, options: mem.map((m) => m.member_code).join('; ') };
-    if (q.code === 'F11') qq = { ...q, options: e02 };
-    if (q.code === 'F09') qq = { ...q, label: `${q.label}: ${openRef.referred_to || ''}` };
-    if (q.code === 'F01') return (html += field(qq, 'visit', prev.F01 || existing?.visit_date || today()));
+    if (role === 'members_met') qq = { ...q, options: mem.map((m) => m.member_code).join('; ') };
+    if (role === 'health_ed') qq = { ...q, options: e02 };
+    if (role === 'ref_status') qq = { ...q, label: `${q.label}: ${openRef.referred_to || ''}` };
+    if (role === 'visit_date') return (html += field(qq, 'visit', prev[q.code] || existing?.visit_date || today()));
     html += field(qq, 'visit', prev[q.code]);
   });
   html += `<div class="q" data-scope="ref" data-q="R1" data-show="" data-req="0" id="refbox" hidden><span class="lab">Referral: reason and place</span><input data-nm="ref|R1" placeholder="Reason"><input data-nm="ref|R2" placeholder="Referred to (facility)" style="margin-top:8px"></div>`;
@@ -552,23 +586,25 @@ function viewVisit(id, existing) {
   const root = $('#vf');
   const ctxOf = (sc, ans) => ({ age: null, months: null, sex: null, ans });
   wireForm(root, ctxOf);
-  root.addEventListener('change', () => { $('#refbox').hidden = readScope(root, 'visit').F13 !== 'Yes'; });
+  root.addEventListener('change', () => { $('#refbox').hidden = readScope(root, 'visit')[fr.ref_flag] !== 'Yes'; });
   $('#submit').onclick = async (e) => {
     e.preventDefault(); if (!validate(root)) return;
     const v = readScope(root, 'visit');
     $$('[data-scope="visit"]', root).forEach((bx) => { if (bx.hidden) delete v[bx.dataset.q]; });
-    const F07 = {}, F08 = {};
-    needBP.forEach((m) => { const x = readScope(root, `f07:${m.member_code}`).F07; if (x) F07[m.member_code] = x; });
-    needWt.forEach((m) => { const x = readScope(root, `f08:${m.member_code}`).F08; if (x) F08[m.member_code] = x; });
-    const obs = { ...v, ...(Object.keys(F07).length ? { F07 } : {}), ...(Object.keys(F08).length ? { F08 } : {}) };
+    const BPc = fr.bp_recheck, WTc = fr.wt_recheck, F07 = {}, F08 = {};
+    needBP.forEach((m) => { const x = readScope(root, `f07:${m.member_code}`)[BPc]; if (x) F07[m.member_code] = x; });
+    needWt.forEach((m) => { const x = readScope(root, `f08:${m.member_code}`)[WTc]; if (x) F08[m.member_code] = x; });
+    const obs = { ...v, ...(Object.keys(F07).length ? { [BPc]: F07 } : {}), ...(Object.keys(F08).length ? { [WTc]: F08 } : {}) };
+    if (S.forms.FR && Q.some((x) => x.role)) { obs.v = 2; obs.std = stdOf(Q, obs); }
     const n = existing?.visit_number || (Math.max(1, ...S.data.visits.filter((x) => x.family_id === id).map((x) => x.visit_number || 1)) + 1);
-    const values = { visit_date: v.F01 || today(), visit_number: n, academic_phase: S.student?.current_phase || null, visit_purpose: 'Follow-up', persons_contacted: v.F02 || [], observations: obs, health_education: v.F11 || [], referral_needed: v.F13 === 'Yes', next_followup_date: v.F14 || null, status: 'SUBMITTED', submitted_by: S.me.user_id, submitted_at: new Date().toISOString(), form_version_id: S.forms.followupId };
+    const values = { visit_date: v[fr.visit_date] || today(), visit_number: n, academic_phase: S.student?.current_phase || null, visit_purpose: 'Follow-up', persons_contacted: v[fr.members_met] || [], observations: obs, health_education: v[fr.health_ed] || [], referral_needed: v[fr.ref_flag] === 'Yes', next_followup_date: v[fr.next_date] || null, status: 'SUBMITTED', submitted_by: S.me.user_id, submitted_at: new Date().toISOString(), form_version_id: S.forms.followupId };
     try {
       const r = existing
         ? await write({ table: 'visit_records', action: 'update', match: { visit_id: existing.visit_id }, values })
         : await write({ table: 'visit_records', action: 'insert', values: { visit_id: uuid(), institution_id: f.institution_id, family_id: id, ...values } });
-      if (openRef && (v.F09 === 'Completed' || v.F09 === 'Refused')) await write({ table: 'referrals', action: 'update', match: { referral_id: openRef.referral_id }, values: { status: v.F09 === 'Completed' ? 'COMPLETED' : 'CLOSED', followup_notes: `Visit ${n}: ${v.F09}` } });
-      if (v.F13 === 'Yes') { const rr = readScope(root, 'ref'); await write({ table: 'referrals', action: 'insert', values: { referral_id: uuid(), institution_id: f.institution_id, family_id: id, referral_date: today(), referral_reason: rr.R1 || 'See visit ' + n, referred_to: rr.R2 || null, status: 'OPEN', created_by: S.me.user_id } }); }
+      const rs = v[fr.ref_status];
+      if (openRef && (rs === 'Completed' || rs === 'Refused')) await write({ table: 'referrals', action: 'update', match: { referral_id: openRef.referral_id }, values: { status: rs === 'Completed' ? 'COMPLETED' : 'CLOSED', followup_notes: `Visit ${n}: ${rs}` } });
+      if (v[fr.ref_flag] === 'Yes') { const rr = readScope(root, 'ref'); await write({ table: 'referrals', action: 'insert', values: { referral_id: uuid(), institution_id: f.institution_id, family_id: id, referral_date: today(), referral_reason: rr.R1 || 'See visit ' + n, referred_to: rr.R2 || null, status: 'OPEN', created_by: S.me.user_id } }); }
       toast(r === 'queued' ? 'Saved on phone; will upload when online' : 'Visit submitted to your mentor'); location.hash = `#/family/${id}`;
     } catch (err) { toast(friendly(err)); }
   };
@@ -581,7 +617,7 @@ function viewVisitView(vid) {
   const lab = (k) => (S.forms.followup.find((q) => q.code === k) || {}).label || k;
   const val = (x) => esc(Array.isArray(x) ? x.join(', ') : typeof x === 'object' && x ? Object.entries(x).map(([a, b]) => `${a}: ${b}`).join('; ') : x);
   app.innerHTML = `<div class="note info">${badge(v._queued ? 'QUEUED' : v.status)} ${v.status === 'VERIFIED' ? 'Verified by your mentor.' : 'With your mentor for review.'}</div>
-    <div class="card" style="margin-top:12px"><table>${Object.entries(v.observations || {}).map(([k, x]) => `<tr><td class="small muted">${esc(k)}</td><td>${esc(lab(k))}</td><td>${val(x)}</td></tr>`).join('')}</table></div>`;
+    <div class="card" style="margin-top:12px"><table>${Object.entries(v.observations || {}).filter(([k]) => k !== 'std' && k !== 'v').map(([k, x]) => `<tr><td class="small muted">${esc(k)}</td><td>${esc(lab(k))}</td><td>${val(x)}</td></tr>`).join('')}</table></div>`;
 }
 
 function viewSync() {

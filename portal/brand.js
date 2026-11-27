@@ -1,5 +1,5 @@
 // College branding: from ?c=CODE in the link, else the college of the last signed-in user.
-import { BRANDS, CREDIT } from './config.js?v=0.4.6';
+import { BRANDS, CREDIT } from './config.js?v=0.4.7';
 export { CREDIT };
 let active = '';
 export function brandCode() {

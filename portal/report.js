@@ -2,8 +2,16 @@
 // Pure module: works in the browser (portal) and in Node (testing).
 // Family members are never named in reports (DPDP data minimisation); families appear by code.
 
+// v2 forms (BIMSR v2.1) keep a standard block (std) with v1-equivalent codes for analytics and reports.
+function stdData(D) {
+  const bl = (b) => (b?.assessment_data?.v === 2 ? { ...b, assessment_data: { ...(b.assessment_data.std || {}) } } : b);
+  const vi = (v) => (v?.observations?.v === 2 ? { ...v, observations: { ...(v.observations.std || {}) } } : v);
+  return { ...D, baselines: (D.baselines || []).map(bl), visits: (D.visits || []).map(vi), ...(D.baselinesAll ? { baselinesAll: D.baselinesAll.map(bl) } : {}) };
+}
+
 // ---------------- analytics ----------------
-export function computeAnalytics(D, todayISO) {
+export function computeAnalytics(D0, todayISO) {
+  const D = stdData(D0);
   const today = todayISO || (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })();
   const pct = (n, d) => (d ? `${n} (${((100 * n) / d).toFixed(1)}%)` : '-');
   const fam = D.families, mem = D.members.filter((m) => m.is_active !== false);
@@ -125,7 +133,8 @@ export function computeAnalytics(D, todayISO) {
 // ---------------- Word document ----------------
 const WORD = { OPEN: 'Open', IN_PROGRESS: 'In progress', COMPLETED: 'Completed', CLOSED: 'Closed', SUBMITTED: 'With mentor', VERIFIED: 'Verified', RETURNED: 'Returned', DRAFT: 'Draft', GRANTED: 'Granted', PENDING: 'Pending', DECLINED: 'Declined', WITHDRAWN: 'Withdrawn', APPROVED: 'Approved', COMMENTED: 'Comment' };
 const word = (x) => WORD[x] || x;
-export async function buildReport(docx, D, opts = {}) {
+export async function buildReport(docx, D0, opts = {}) {
+  const D = stdData(D0);
   const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType, ShadingType, AlignmentType, HeadingLevel,
     Header, Footer, PageNumber, BorderStyle, PageBreak, TableLayoutType, ImageRun } = docx;
   const A = computeAnalytics(D, opts.today);

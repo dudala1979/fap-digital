@@ -2,8 +2,8 @@
 // Plain JavaScript, no build step. Talks to Supabase; the database access rules (RLS)
 // decide what each signed-in person can see. This file never bypasses them.
 import { createClient } from './vendor/supabase-2.119.2.js';
-import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.6';
-import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.6';
+import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.7';
+import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.7';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, storageKey: 'fap-portal-auth' }
@@ -58,7 +58,8 @@ async function loadMe() {
   const inst = await q(sb.from('institutions').select('institution_name, institution_code').eq('institution_id', S.me.institution_id).limit(1));
   S.institution = inst[0] || null;
   setBrand(S.institution?.institution_code); applyBrand();
-  const forms = await qAll(sb.from('form_versions').select('form_schema'), 'form_version_id');
+  const forms0 = await qAll(sb.from('form_versions').select('form_schema, institution_id'), 'form_version_id');
+  const own = forms0.filter((f) => f.institution_id); const forms = own.length ? own : forms0.filter((f) => !f.institution_id); // college's own approved forms win
   S.order = {}; let n = 0;
   forms.forEach((f) => (f.form_schema?.questions || []).forEach((qq) => { S.labels[qq.code] = qq.label; if (!(qq.code in S.order)) S.order[qq.code] = n++; }));
   return true;
@@ -100,18 +101,20 @@ function renderValue(v) {
 }
 
 function flagFor(code, v) {
-  if ((code === 'C03' || code === 'C01' || code === 'C02') && typeof v === 'string') {
+  if (['C03', 'C01', 'C02', 'C14b', 'C14c', 'C14d', 'FU04'].includes(code) && typeof v === 'string') {
     const [s, d] = v.split('/').map(Number);
     if (s >= 140 || d >= 90) return '<span class="flag">High BP</span>';
   }
   if (code === 'K04' && Number(v) && Number(v) < 11.5) return '<span class="flag">Low MUAC</span>';
+  if (code === 'ANC05' && Array.isArray(v) && v.some((x) => x !== 'None')) return '<span class="flag">Danger sign</span>';
+  if (code === 'CH04' && Array.isArray(v) && v.some((x) => x !== 'None')) return '<span class="flag">Danger sign</span>';
   if (code === 'P07' && Array.isArray(v) && v.some((x) => x !== 'None')) return '<span class="flag">Danger sign</span>';
   if (code === 'P04' && Number(v) <= 1) return '<span class="flag">Few ANC</span>';
   return '';
 }
 
 function qaTable(obj) {
-  const rows = Object.entries(obj || {}).sort((a, b) => (S.order?.[a[0]] ?? 999) - (S.order?.[b[0]] ?? 999)).map(([code, v]) =>
+  const rows = Object.entries(obj || {}).filter(([k]) => k !== 'std' && k !== 'v').sort((a, b) => (S.order?.[a[0]] ?? 999) - (S.order?.[b[0]] ?? 999)).map(([code, v]) =>
     `<tr><td class="code">${esc(code)}</td><td>${esc(S.labels[code] || code)}</td><td>${renderValue(v)}${flagFor(code, v)}</td></tr>`).join('');
   return rows ? `<div class="tbox"><table><thead><tr><th>Code</th><th>Question</th><th>Answer</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted">Nothing recorded.</p>';
 }
@@ -381,7 +384,7 @@ async function reportData() {
 async function downloadReport(kind, studentId) {
   toast('Preparing the Word report…');
   try {
-    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.6')]);
+    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.7')]);
     let D = await reportData();
     const st = D.students.find((s) => s.student_id === studentId);
     let extra = {};
@@ -418,7 +421,7 @@ app.addEventListener('click', (e) => {
 async function viewOverview() {
   setTab('overview');
   if (!isHOD() && !S.roles.includes('AUDITOR')) { location.hash = '#/'; return; }
-  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.6')]);
+  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.7')]);
   const A = R.computeAnalytics(D);
   const tbl = (rows) => `<div class="tbox"><table><thead><tr><th>Indicator</th><th>Number (%)</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td><strong>${esc(v)}</strong></td></tr>`).join('')}</tbody></table></div>`;
   app.innerHTML = `<div class="row"><div style="flex:1"><h1>College overview</h1><p class="muted">${esc(D.institution.institution_name || '')} · ${esc(D.institution.district || '-')}, ${esc(D.institution.state || '-')} · as of ${fmtDate(new Date())}</p></div>
@@ -448,7 +451,7 @@ const svgToPng = (svg, scale = 2) => new Promise((res, rej) => {
 const saveBlob = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); };
 const chartMeta = (D) => ({ place: `${D.institution.institution_name || ''}, ${D.institution.district || '-'}, ${D.institution.state || '-'}.`, source: `Source: FAP Digital Health, data as of ${fmtDate(new Date())}.` });
 async function analyticsPack() {
-  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.6')]);
+  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.7')]);
   const today = localISO(), f = S.af || {};
   const D = C.filterData(D0, f, today), fl = C.filterLabel(D0, f);
   const meta = chartMeta(D0); if (fl) meta.place = meta.place + ' ' + fl;

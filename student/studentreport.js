@@ -12,8 +12,16 @@ const done = (x) => x && (x.status === 'SUBMITTED' || x.status === 'VERIFIED');
 const list = (a) => (Array.isArray(a) ? a.filter((x) => x && x !== 'None').join(', ') : a || '');
 const bp = (x) => { const [s, d] = String(x || '').split('/').map(Number); return s && d ? { s, d } : null; };
 
+// v2 forms (BIMSR v2.1) keep a standard block (std) with v1-equivalent codes for analytics and reports.
+function stdData(D) {
+  const bl = (b) => (b?.assessment_data?.v === 2 ? { ...b, assessment_data: { ...(b.assessment_data.std || {}) } } : b);
+  const vi = (v) => (v?.observations?.v === 2 ? { ...v, observations: { ...(v.observations.std || {}) } } : v);
+  return { ...D, baselines: (D.baselines || []).map(bl), visits: (D.visits || []).map(vi), ...(D.baselinesAll ? { baselinesAll: D.baselinesAll.map(bl) } : {}) };
+}
+
 // ---------- the numbers behind the report ----------
-export function computeStudentReport(D, todayISO) {
+export function computeStudentReport(D0, todayISO) {
+  const D = stdData(D0);
   const today = todayISO || localISO();
   const fams = D.families.slice().sort((a, b) => (a.slot_no || 0) - (b.slot_no || 0) || String(a.family_code).localeCompare(b.family_code));
   const out = { today, families: [], totals: { families: fams.length, consented: 0, baselines: 0, verified: 0, members: 0, visits: 0, referrals: 0, refDone: 0, male: 0, female: 0 },
@@ -76,7 +84,8 @@ export function computeStudentReport(D, todayISO) {
 }
 
 // ---------- the Word document ----------
-export async function buildStudentReport(docx, D, opts = {}) {
+export async function buildStudentReport(docx, D0, opts = {}) {
+  const D = stdData(D0);
   const { Document, Paragraph, TextRun, Table, TableRow, TableCell, WidthType, ShadingType, AlignmentType, HeadingLevel, Header, Footer, PageNumber, BorderStyle, PageBreak, ImageRun } = docx;
   const R = computeStudentReport(D, opts.today);
   const FONT = 'Arial', TEAL = '0B6B66', INK2 = '4F5E5B';

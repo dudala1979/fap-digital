@@ -1,6 +1,6 @@
 // Service worker: keeps the app screens available offline.
 // Family data is NOT cached here; it is kept encrypted by app.js.
-const CACHE = 'fap-student-v0.3.6';
+const CACHE = 'fap-student-v0.3.7';
 const SHELL = ['./', './index.html', './style.css', './app.js', './config.js', './brand.js', './studentreport.js', './charts.js', './vendor/supabase-2.119.2.js', './manifest.webmanifest', './icon-192.png', './icon-512.png',
   'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm'];
 

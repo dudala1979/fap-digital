@@ -10,6 +10,13 @@ const INK = '#0b0b0b', INK2 = '#52514e', GRID = '#e4e2dc', SURF = '#fcfcfb';
 const FONT = "font-family=\"Arial, Helvetica, sans-serif\"";
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+// v2 forms (BIMSR v2.1) keep a standard block (std) with v1-equivalent codes for analytics and reports.
+export function stdData(D) {
+  const bl = (b) => (b?.assessment_data?.v === 2 ? { ...b, assessment_data: { ...(b.assessment_data.std || {}) } } : b);
+  const vi = (v) => (v?.observations?.v === 2 ? { ...v, observations: { ...(v.observations.std || {}) } } : v);
+  return { ...D, baselines: (D.baselines || []).map(bl), visits: (D.visits || []).map(vi), ...(D.baselinesAll ? { baselinesAll: D.baselinesAll.map(bl) } : {}) };
+}
+
 // ---------- statistics ----------
 export function wilson(n, N, z = 1.96) {
   if (!N) return { p: null, lo: null, hi: null };
@@ -19,7 +26,8 @@ export function wilson(n, N, z = 1.96) {
 }
 const ageAt = (dob, on) => (dob ? Math.floor((new Date(on) - new Date(dob)) / (365.25 * 864e5)) : null);
 
-export function computePrevalence(D, todayISO) {
+export function computePrevalence(D0, todayISO) {
+  const D = stdData(D0);
   const today = todayISO || (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })();
   const done = (b) => b && (b.status === 'SUBMITTED' || b.status === 'VERIFIED');
   const latest = {}; D.baselines.filter(done).forEach((b) => { if (!latest[b.family_id] || b.assessment_date > latest[b.family_id].assessment_date) latest[b.family_id] = b; });
@@ -252,7 +260,8 @@ function meanCI(xs) {
   return { n, mean: m, lo: m - h, hi: m + h };
 }
 const WORDS = { OPEN: 'Open', IN_PROGRESS: 'In progress', COMPLETED: 'Completed', CLOSED: 'Closed', REFUSED: 'Refused', CANCELLED: 'Cancelled', PENDING: 'Pending' };
-export function computeTrends(D, todayISO) {
+export function computeTrends(D0, todayISO) {
+  const D = stdData(D0);
   const today = todayISO || (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })();
   const done = (x) => x && (x.status === 'SUBMITTED' || x.status === 'VERIFIED');
   const B = (D.baselinesAll || D.baselines).filter(done), V = D.visits.filter(done);
