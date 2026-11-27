@@ -14,5 +14,7 @@ export const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&am
 // Block for login screens: college logo + name, or nothing.
 export function brandBlock() {
   const b = brand(); if (!b) return '';
-  return `<div class="cbrand">${b.logo ? `<img src="${esc(b.logo)}" alt="${esc(b.name)} logo">` : ''}<div><strong>${esc(b.name)}</strong><small>${esc(b.place || '')}</small></div></div>`;
+  const as = new URLSearchParams(location.search).get('as');
+  const role = as === 'hod' ? 'HOD Login' : as === 'faculty' ? 'Faculty Mentor Login' : '';
+  return `<div class="cbrand">${b.logo ? `<img src="${esc(b.logo)}" alt="${esc(b.name)} logo">` : ''}<div><strong>${esc(b.name)}</strong><small>${esc(b.place || '')}</small>${role ? `<em>${role}</em>` : ''}</div></div>`;
 }

@@ -296,7 +296,7 @@ function validate(root) {
 }
 
 // ---------------- screens ----------------
-function applyBrand() { const b = brand(), im = $('#clogo'); if (b?.logo) { im.src = b.logo; im.alt = b.name + ' logo'; im.hidden = false; } else im.hidden = true; }
+function applyBrand() { const b = brand(), im = $('#clogo'); if (b?.logo) { im.src = b.mark || b.logo; im.alt = b.name + ' logo'; im.hidden = false; } else im.hidden = true; }
 function head(title, sub, back) {
   applyBrand(); $('#top').hidden = false; $('#title').textContent = title; $('#subtitle').textContent = sub || '';
   const b = $('#back'); b.hidden = !back; b.onclick = () => (location.hash = back); setChip();
