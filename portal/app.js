@@ -2,9 +2,9 @@
 // Plain JavaScript, no build step. Talks to Supabase; the database access rules (RLS)
 // decide what each signed-in person can see. This file never bypasses them.
 import { createClient } from './vendor/supabase-2.119.2.js';
-import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.15';
-import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.15';
-import { FOODS } from './nutrition.js?v=0.4.15';
+import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.16';
+import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.16';
+import { FOODS } from './nutrition.js?v=0.4.16';
 
 // an invitation or password-reset email lands here with #access_token...&type=invite|recovery
 const FROM_EMAIL_LINK = /type=(invite|recovery)/.test(location.hash);
@@ -416,7 +416,7 @@ async function reportData() {
 async function downloadReport(kind, studentId) {
   toast('Preparing the Word report…');
   try {
-    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.15')]);
+    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.16')]);
     let D = await reportData();
     const st = D.students.find((s) => s.student_id === studentId);
     let extra = {};
@@ -453,7 +453,7 @@ app.addEventListener('click', (e) => {
 async function viewOverview() {
   setTab('overview');
   if (!isHOD() && !S.roles.includes('AUDITOR')) { location.hash = '#/'; return; }
-  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.15')]);
+  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.16')]);
   const A = R.computeAnalytics(D);
   const tbl = (rows) => `<div class="tbox"><table><thead><tr><th>Indicator</th><th>Number (%)</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td><strong>${esc(v)}</strong></td></tr>`).join('')}</tbody></table></div>`;
   app.innerHTML = `<div class="row"><div style="flex:1"><h1>College overview</h1><p class="muted">${esc(D.institution.institution_name || '')} · ${esc(D.institution.district || '-')}, ${esc(D.institution.state || '-')} · as of ${fmtDate(new Date())}</p></div>
@@ -483,7 +483,7 @@ const svgToPng = (svg, scale = 2) => new Promise((res, rej) => {
 const saveBlob = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); };
 const chartMeta = (D) => ({ place: `${D.institution.institution_name || ''}, ${D.institution.district || '-'}, ${D.institution.state || '-'}.`, source: `Source: FAP Digital Health, data as of ${fmtDate(new Date())}.` });
 async function analyticsPack() {
-  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.15')]);
+  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.16')]);
   const today = localISO(), f = S.af || {};
   const D = C.filterData(D0, f, today), fl = C.filterLabel(D0, f);
   const meta = chartMeta(D0); if (fl) meta.place = meta.place + ' ' + fl;
@@ -880,7 +880,7 @@ async function viewManage() {
   app.querySelectorAll('[data-promote]').forEach((b) => (b.onclick = async () => {
     if (!confirm(`Move ${b.dataset.name} from ${b.dataset.ph} to the next phase? All active students of this batch move together. This is recorded in the audit log.`)) return;
     b.disabled = true;
-    try { const nxt = await q(sb.rpc('fap_promote_batch', { p_batch: b.dataset.promote })); toast(`${b.dataset.name} is now in ${nxt}`); viewManage(); } catch (err) { fail(err); b.disabled = false; }
+    try { const nxt = await q(sb.rpc('fap_promote_batch', { p_batch: b.dataset.promote, p_expected: b.dataset.ph })); toast(`${b.dataset.name} is now in ${nxt}`); viewManage(); } catch (err) { fail(err); b.disabled = false; }
   }));
   wireBulk({ users, faculty, students, batches });
   app.querySelectorAll('[data-assign]').forEach((sel) => (sel.onchange = async () => {
