@@ -6,6 +6,7 @@ import { createClient } from './vendor/supabase-2.119.2.js';
 import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js';
 import { CREDIT, brand, brandBlock, setBrand } from './brand.js';
 import * as NUT from './nutrition.js';
+import * as VAL from './validation.js';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, { auth: { persistSession: true, autoRefreshToken: true, storageKey: 'fap-student-auth' } });
 const $ = (s, r = document) => r.querySelector(s);
@@ -261,7 +262,7 @@ function field(q, scope, val, cls = '') {
   } else {
     input = `<input type="text" data-nm="${nm}" value="${esc(val || '')}" ${q.type === 'text+number' ? 'placeholder="Name, distance in km"' : ''}>`;
   }
-  return `<div class="q ${cls}" data-q="${q.code}" data-scope="${scope}" data-show="${esc(q.show_if || '')}" data-req="${q.required === 'Yes' && q.type !== 'computed' ? 1 : 0}">
+  return `<div class="q ${cls}" data-q="${q.code}" data-scope="${scope}" data-show="${esc(q.show_if || '')}" data-t="${esc(q.type)}" data-o="${esc(q.options || '')}" data-r="${esc(q.required || '')}" data-req="${q.required === 'Yes' && q.type !== 'computed' ? 1 : 0}">
     <span class="lab"><span class="code">${esc(q.code)}</span>${esc(q.label)}${req}</span>${input}${q.notes && /flag|exclusive|referral|never|only/i.test(q.notes) ? `<div class="small muted" style="margin-top:6px">${esc(q.notes)}</div>` : ''}</div>`;
 }
 
@@ -378,8 +379,8 @@ function wireForm(root, ctxOf) {
     const t = e.target;
     if (t.type === 'checkbox' && t.checked) { // "None" is exclusive
       const group = $$(`input[type=checkbox][name="${CSS.escape(t.name)}"]`, root);
-      if (t.value === 'None') group.forEach((c) => { if (c !== t) c.checked = false; });
-      else group.forEach((c) => { if (c.value === 'None') c.checked = false; });
+      if (VAL.EXCLUSIVE.test(t.value)) group.forEach((c) => { if (c !== t) c.checked = false; });
+      else group.forEach((c) => { if (VAL.EXCLUSIVE.test(c.value)) c.checked = false; });
     }
     go();
   });
@@ -395,16 +396,38 @@ function wireForm(root, ctxOf) {
   return go();
 }
 
-function validate(root) {
-  let first = null;
-  $$('.q', root).forEach((b) => b.classList.remove('err'));
-  $$('.q[data-req="1"]', root).forEach((b) => {
-    if (b.hidden) return;
-    const sc = b.dataset.scope, code = b.dataset.q;
-    const v = readScope(root, sc)[code];
-    if (v === undefined || (Array.isArray(v) && !v.length)) { b.classList.add('err'); first = first || b; }
+// draft = true: only format/range errors block; required and "please re-check" warnings are skipped
+function validate(root, ctxOf = null, { draft = false } = {}) {
+  let first = null; const softs = [];
+  $$('.q', root).forEach((b) => { b.classList.remove('err'); $('.verr', b)?.remove(); });
+  const mark = (b, msgs) => { b.classList.add('err'); b.insertAdjacentHTML('beforeend', `<div class="verr small" style="color:var(--bad);margin-top:4px">${esc(msgs.join('; '))}</div>`); first = first || b; };
+  const cache = {}; const scopeVals = (sc) => (cache[sc] = cache[sc] || readScope(root, sc));
+  const visitDate = (() => { const vd = $('.q[data-q="FU01"]', root); return vd ? scopeVals(vd.dataset.scope).FU01 : null; })();
+  $$('.q[data-t]', root).forEach((b) => {
+    if (b.hidden || b.closest('[hidden]')) return;
+    const sc = b.dataset.scope, code = b.dataset.q, t = b.dataset.t;
+    const v = scopeVals(sc)[code];
+    const q = { code, type: t, options: b.dataset.o, required: b.dataset.r };
+    const msgs = [];
+    if (!draft && b.dataset.req === '1' && (v === undefined || (Array.isArray(v) && !v.length))) msgs.push('required');
+    if (t === 'bp') { const ps = $$('[data-part]', b).map((x) => x.value); if ((ps[0] && !ps[1]) || (!ps[0] && ps[1])) msgs.push('enter both systolic and diastolic'); }
+    const r = VAL.checkField(q, v, { refDate: code === 'FU07' && visitDate ? visitDate : null });
+    msgs.push(...r.hard);
+    if (msgs.length) mark(b, msgs);
+    if (!draft) r.soft.forEach((m) => softs.push(`${code}${sc.startsWith('m:') ? ' (' + sc.slice(2) + ')' : ''}: ${m}`));
   });
-  if (first) { first.scrollIntoView({ behavior: 'smooth', block: 'center' }); toast('Please answer the questions marked in red'); return false; }
+  if (first) { first.scrollIntoView({ behavior: 'smooth', block: 'center' }); toast(draft ? 'Please correct the values marked in red' : 'Please correct the questions marked in red'); return false; }
+  if (!draft && ctxOf) {
+    const rr = R(); const shares = []; let residents = 0;
+    Object.keys(cache).concat($$('[data-scope]', root).map((x) => x.dataset.scope)).filter((x, i, arr) => arr.indexOf(x) === i).forEach((sc) => {
+      const a = scopeVals(sc);
+      if (sc.startsWith('m:')) { const ctx = ctxOf(sc, a); VAL.checkMember(a, ctx, rr).forEach((m) => softs.push(`${sc.slice(2)}: ${m}`)); if (rr.nut_share && a[rr.nut_share] !== undefined) shares.push(a[rr.nut_share]); }
+      if (a.F12) residents = Number(a.F12);
+    });
+    const hh = scopeVals('household'); const kcal = rr.nut_register && hh[rr.nut_register] ? NUT.familyTotals(hh[rr.nut_register]).kcal : 0;
+    softs.push(...VAL.checkHousehold({ shares, residents, familyKcal: kcal }));
+  }
+  if (softs.length && !confirm('Please re-check these values:\n\n- ' + softs.join('\n- ') + '\n\nPress OK to submit as they are, or Cancel to go back and correct.')) return false;
   return true;
 }
 
@@ -757,7 +780,7 @@ function viewBaseline(id) {
   };
   const proof = wireProof(b?.assessment_data?._proof, id);
   const save = async (status) => {
-    if (status === 'SUBMITTED' && !validate(root)) return;
+    if (!validate(root, ctxOf, { draft: status !== 'SUBMITTED' })) return;
     const d = collect();
     try {
       const bid = b?.baseline_id || uuid();
@@ -811,7 +834,7 @@ function viewVisit(id, existing) {
   const proof = wireProof(existing?.observations?._proof, id);
   root.addEventListener('change', () => { $('#refbox').hidden = readScope(root, 'visit')[fr.ref_flag] !== 'Yes'; });
   $('#submit').onclick = async (e) => {
-    e.preventDefault(); if (!validate(root)) return;
+    e.preventDefault(); if (!validate(root, ctxOf)) return;
     const v = readScope(root, 'visit');
     $$('[data-scope="visit"]', root).forEach((bx) => { if (bx.hidden) delete v[bx.dataset.q]; });
     const BPc = fr.bp_recheck, WTc = fr.wt_recheck, F07 = {}, F08 = {};
