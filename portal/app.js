@@ -2,9 +2,9 @@
 // Plain JavaScript, no build step. Talks to Supabase; the database access rules (RLS)
 // decide what each signed-in person can see. This file never bypasses them.
 import { createClient } from './vendor/supabase-2.119.2.js';
-import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.16';
-import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.16';
-import { FOODS } from './nutrition.js?v=0.4.16';
+import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.17';
+import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.17';
+import { FOODS } from './nutrition.js?v=0.4.17';
 
 // an invitation or password-reset email lands here with #access_token...&type=invite|recovery
 const FROM_EMAIL_LINK = /type=(invite|recovery)/.test(location.hash);
@@ -61,10 +61,12 @@ async function loadMe() {
   const inst = await q(sb.from('institutions').select('institution_name, institution_code').eq('institution_id', S.me.institution_id).limit(1));
   S.institution = inst[0] || null;
   setBrand(S.institution?.institution_code); applyBrand();
-  const forms0 = await qAll(sb.from('form_versions').select('form_schema, institution_id'), 'form_version_id');
+  const forms0 = await qAll(sb.from('form_versions').select('form_schema, institution_id, form_code, module_code, version_label'), 'form_version_id');
   const own = forms0.filter((f) => f.institution_id); const forms = own.length ? own : forms0.filter((f) => !f.institution_id); // college's own approved forms win
   S.order = {}; let n = 0;
   forms.forEach((f) => (f.form_schema?.questions || []).forEach((qq) => { S.labels[qq.code] = qq.label; if (!(qq.code in S.order)) S.order[qq.code] = n++; }));
+  S.allQ = forms.filter((f) => f.form_schema?.engine === 2).flatMap((f) => (f.form_schema.questions || []).filter((qq) => qq.type !== 'computed').map((qq) => ({ form: f.module_code || f.form_code, code: qq.code, label: qq.label })));
+  S.formVersion = 'v' + (forms.find((f) => f.form_code === 'BASELINE')?.version_label || '2.1');
   return true;
 }
 
@@ -416,7 +418,7 @@ async function reportData() {
 async function downloadReport(kind, studentId) {
   toast('Preparing the Word report…');
   try {
-    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.16')]);
+    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.17')]);
     let D = await reportData();
     const st = D.students.find((s) => s.student_id === studentId);
     let extra = {};
@@ -453,7 +455,7 @@ app.addEventListener('click', (e) => {
 async function viewOverview() {
   setTab('overview');
   if (!isHOD() && !S.roles.includes('AUDITOR')) { location.hash = '#/'; return; }
-  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.16')]);
+  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.17')]);
   const A = R.computeAnalytics(D);
   const tbl = (rows) => `<div class="tbox"><table><thead><tr><th>Indicator</th><th>Number (%)</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td><strong>${esc(v)}</strong></td></tr>`).join('')}</tbody></table></div>`;
   app.innerHTML = `<div class="row"><div style="flex:1"><h1>College overview</h1><p class="muted">${esc(D.institution.institution_name || '')} · ${esc(D.institution.district || '-')}, ${esc(D.institution.state || '-')} · as of ${fmtDate(new Date())}</p></div>
@@ -483,7 +485,7 @@ const svgToPng = (svg, scale = 2) => new Promise((res, rej) => {
 const saveBlob = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); };
 const chartMeta = (D) => ({ place: `${D.institution.institution_name || ''}, ${D.institution.district || '-'}, ${D.institution.state || '-'}.`, source: `Source: FAP Digital Health, data as of ${fmtDate(new Date())}.` });
 async function analyticsPack() {
-  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.16')]);
+  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.17')]);
   const today = localISO(), f = S.af || {};
   const D = C.filterData(D0, f, today), fl = C.filterLabel(D0, f);
   const meta = chartMeta(D0); if (fl) meta.place = meta.place + ' ' + fl;
@@ -947,6 +949,162 @@ async function viewLogbook() {
 }
 
 // ---------- router ----------
+
+// ---------- pilot validity report: student face validity, app usability (SUS), accuracy of student data ----------
+const VTOL = { sbp: 5, dbp: 5, weight_kg: 0.5, height_cm: 1.0, muac_cm: 0.5 };
+const VMEAS = [['sbp', 'Systolic BP (mm Hg)'], ['dbp', 'Diastolic BP (mm Hg)'], ['weight_kg', 'Weight (kg)'], ['height_cm', 'Height (cm)'], ['muac_cm', 'MUAC (cm)']];
+const VCAT = [['htn', 'Known hypertension (C03)', ['Yes', 'No']], ['tobacco', 'Current tobacco use (C08)', ['Yes', 'No']],
+  ['toilet', 'Toilet facility (E11)', ['Own flush / pour-flush', 'Shared', 'Community toilet', 'Pit latrine', 'Open defecation']], ['referral', 'Referral needed (D10)', ['Yes', 'No']]];
+const FVI_CUT = 0.8, FVI_MIN = 5;
+const vmean = (a) => a.reduce((p, x) => p + x, 0) / a.length;
+const vsd = (a) => { const m = vmean(a); return Math.sqrt(a.reduce((p, x) => p + (x - m) ** 2, 0) / (a.length - 1)); };
+// ICC(2,1): two-way random, absolute agreement, single rater, k = 2 (student, mentor)
+function iccA(pairs) {
+  const n = pairs.length; if (n < 5) return null;
+  const d = pairs.map(([x, y]) => x - y), m = pairs.map(([x, y]) => (x + y) / 2), db = vmean(d);
+  const msr = 2 * vsd(m) ** 2, mse = d.reduce((p, x) => p + (x - db) ** 2, 0) / 2 / (n - 1), msc = (n * db * db) / 2;
+  const den = msr + mse + (2 * (msc - mse)) / n; return den > 0 ? (msr - mse) / den : null;
+}
+function kappa(pairs, cats) {
+  const n = pairs.length; if (n < 5) return null;
+  const po = pairs.filter(([a, b]) => a === b).length / n;
+  const pe = cats.reduce((p, c) => p + (pairs.filter(([a]) => a === c).length / n) * (pairs.filter(([, b]) => b === c).length / n), 0);
+  return pe >= 1 ? null : (po - pe) / (1 - pe);
+}
+const iccWord = (v) => (v === null ? 'Need 5+ pairs' : v >= 0.9 ? 'Excellent' : v >= 0.75 ? 'Good' : v >= 0.5 ? 'Moderate: retrain' : 'Poor: retrain and re-check');
+const kWord = (v) => (v === null ? 'Need 5+ pairs' : v > 0.8 ? 'Almost perfect' : v > 0.6 ? 'Substantial' : v > 0.4 ? 'Moderate: retrain' : 'Poor: retrain and re-check');
+const susScore = (a) => ((a[0] + a[2] + a[4] + a[6] + a[8] - 5) + (25 - (a[1] + a[3] + a[5] + a[7] + a[9]))) * 2.5;
+const f2 = (x, d = 2) => (x === null || x === undefined || Number.isNaN(x) ? '-' : Number(x).toFixed(d));
+const pct = (x) => (x === null || x === undefined ? '-' : Math.round(x * 100) + '%');
+
+// the student's values for one member, from the family's latest v2 baseline
+function studentValues(c, familyId, memberCode) {
+  const bl = c.baselines.filter((b) => b.family_id === familyId && b.assessment_data?.v === 2).sort((a, b) => String(b.assessment_date).localeCompare(String(a.assessment_date)))[0];
+  if (!bl) return null;
+  const ad = bl.assessment_data, m = ad.members?.[memberCode] || {};
+  let sbp = null, dbp = null;
+  const reads = [m.C14b, m.C14c].filter(Boolean).map((x) => String(x).split('/').map(Number));
+  const bp = m.C14d || (reads.length ? `${Math.round(vmean(reads.map((x) => x[0])))}/${Math.round(vmean(reads.map((x) => x[1])))}` : null);
+  if (bp) [sbp, dbp] = String(bp).split('/').map(Number);
+  const tob = m.C08; const tobacco = ['Current smoker', 'Current smokeless', 'Both'].includes(tob) ? 'Yes' : ['Never', 'Former'].includes(tob) ? 'No' : null;
+  return { date: bl.assessment_date, sbp, dbp, weight_kg: m.C15a ?? null, height_cm: m.C15b ?? null, muac_cm: m.C15e ?? null,
+    htn: Array.isArray(m.C03) ? (m.C03.includes('Hypertension') ? 'Yes' : 'No') : null, tobacco, toilet: ad.household?.E11 || null, referral: ad.wrap_up?.D10 || null };
+}
+
+async function viewRecheck() {
+  const c = await loadData(true);
+  const mine = await q(sb.from('validity_recheck').select('*').order('recheck_date', { ascending: false }));
+  const fams = c.families.filter((f) => c.baselines.some((b) => b.family_id === f.family_id && b.assessment_data?.v === 2 && ['SUBMITTED', 'VERIFIED'].includes(b.status)));
+  app.innerHTML = `<p><a href="#/validity">&larr; Validity report</a></p><h1>Mentor re-check</h1>
+    <p class="muted">Visit the family soon after the student's baseline (ideally within 7 days). Measure the member yourself using the same method (BP: 2 readings, enter the average). The student's values are hidden here so the re-check stays independent.</p>
+    <div class="card"><div class="grid">
+      <div><label class="lbl" for="rf">Family</label><select id="rf"><option value="">Choose…</option>${fams.map((f) => `<option value="${f.family_id}">${esc(f.family_code)} · ${esc(f.student?.name || '')}</option>`).join('')}</select></div>
+      <div><label class="lbl" for="rm">Member</label><select id="rm"><option value="">Choose family first</option></select></div>
+      <div><label class="lbl" for="rd">Re-check date</label><input id="rd" type="date" max="${localISO()}" value="${localISO()}"></div></div>
+      <div class="grid" style="margin-top:8px">
+        <div><label class="lbl">BP average (systolic / diastolic)</label><div class="row"><input id="rs" type="number" min="70" max="260" placeholder="Systolic" style="width:48%"><input id="rdi" type="number" min="40" max="160" placeholder="Diastolic" style="width:48%"></div></div>
+        <div><label class="lbl" for="rw">Weight (kg)</label><input id="rw" type="number" step="0.1" min="1" max="250"></div>
+        <div><label class="lbl" for="rh">Height (cm)</label><input id="rh" type="number" step="0.1" min="40" max="220"></div>
+        <div><label class="lbl" for="ru">MUAC (cm, under 5)</label><input id="ru" type="number" step="0.1" min="6" max="45"></div></div>
+      <div class="grid" style="margin-top:8px">${VCAT.map(([k, lab, opts]) => `<div><label class="lbl" for="rc_${k}">${esc(lab)}</label><select id="rc_${k}"><option value="">Not checked</option>${opts.map((o) => `<option>${esc(o)}</option>`).join('')}</select></div>`).join('')}</div>
+      <label class="lbl" for="rn">Notes (optional)</label><input id="rn" maxlength="500">
+      <div class="row" style="margin-top:10px"><button class="btn" id="rsave">Save re-check</button></div></div>
+    <div class="sec"><h2>Re-checks entered (${mine.length})</h2><div class="tbox"><table><thead><tr><th>Date</th><th>Family</th><th>Member</th><th>BP</th><th>Wt</th><th>Ht</th><th>MUAC</th><th></th></tr></thead><tbody>
+      ${mine.map((r) => `<tr><td>${fmtDate(r.recheck_date)}</td><td>${esc(c.famById[r.family_id]?.family_code || '')}</td><td>${esc(r.member_code)}</td><td>${r.sbp ? `${r.sbp}/${r.dbp}` : '-'}</td><td>${r.weight_kg ?? '-'}</td><td>${r.height_cm ?? '-'}</td><td>${r.muac_cm ?? '-'}</td><td>${r.checked_by === S.me.user_id || isHOD() ? `<button class="btn ghost" data-del="${r.recheck_id}">Delete</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">None yet.</td></tr>'}
+    </tbody></table></div></div>`;
+  $('#rf').onchange = () => { const ms = c.members.filter((m) => m.family_id === $('#rf').value && m.is_active !== false).sort((a, b) => a.member_code.localeCompare(b.member_code, 'en', { numeric: true }));
+    $('#rm').innerHTML = ms.map((m) => `<option value="${esc(m.member_code)}">${esc(m.member_code)} · ${esc(m.sex || '')} · ${esc(m.relationship_to_head || '')}</option>`).join('') || '<option value="">No members</option>'; };
+  app.querySelectorAll('[data-del]').forEach((b) => (b.onclick = async () => { if (!confirm('Delete this re-check?')) return; try { await q(sb.from('validity_recheck').delete().eq('recheck_id', b.dataset.del)); viewRecheck(); } catch (e) { fail(e); } }));
+  $('#rsave').onclick = async () => {
+    const fam = $('#rf').value, mem = $('#rm').value; if (!fam || !mem) return toast('Choose the family and member');
+    const n = (id) => ($(id).value === '' ? null : Number($(id).value));
+    const row = { institution_id: S.me.institution_id, family_id: fam, member_code: mem, recheck_date: $('#rd').value || localISO(), checked_by: S.me.user_id,
+      sbp: n('#rs'), dbp: n('#rdi'), weight_kg: n('#rw'), height_cm: n('#rh'), muac_cm: n('#ru'), notes: $('#rn').value.trim() || null };
+    VCAT.forEach(([k]) => (row[k] = $(`#rc_${k}`).value || null));
+    const errs = [];
+    if ((row.sbp === null) !== (row.dbp === null)) errs.push('enter both systolic and diastolic');
+    if (row.sbp !== null && !(row.sbp >= 70 && row.sbp <= 260 && row.dbp >= 40 && row.dbp <= 160 && row.sbp > row.dbp)) errs.push('BP: systolic 70-260, diastolic 40-160, systolic higher');
+    [['weight_kg', 1, 250], ['height_cm', 40, 220], ['muac_cm', 6, 45]].forEach(([k, lo, hi]) => { if (row[k] !== null && !(row[k] >= lo && row[k] <= hi)) errs.push(`${k.replace('_', ' ')} must be ${lo}-${hi}`); });
+    if (row.recheck_date > localISO()) errs.push('date cannot be in the future');
+    if (![row.sbp, row.weight_kg, row.height_cm, row.muac_cm, ...VCAT.map(([k]) => row[k])].some((x) => x !== null)) errs.push('enter at least one measurement or answer');
+    if (errs.length) return toast(errs.join('; '));
+    $('#rsave').disabled = true;
+    try { await q(sb.from('validity_recheck').insert(row)); toast('Re-check saved'); viewRecheck(); }
+    catch (e) { fail(e); $('#rsave').disabled = false; }
+  };
+}
+
+async function viewValidity() {
+  const c = await loadData(true);
+  const [face, sus, rech] = await Promise.all([
+    qAll(sb.from('validity_face').select('face_id, student_id, form_version, form_code, question_code, clarity, difficulty, comment').eq('form_version', S.formVersion), 'face_id'),
+    q(sb.from('validity_sus').select('student_id, answers, minutes_baseline, minutes_followup, phone_type, comment').eq('form_version', S.formVersion)),
+    q(sb.from('validity_recheck').select('*'))]);
+  const canCheck = S.roles.includes('FACULTY') || isHOD();
+  // face validity
+  const qs = S.allQ || [];
+  const byQ = {}; face.forEach((r) => (byQ[`${r.form_code}|${r.question_code}`] = byQ[`${r.form_code}|${r.question_code}`] || []).push(r));
+  const rows = qs.map((x) => { const rs = byQ[`${x.form}|${x.code}`] || []; const n = rs.length, ok = rs.filter((r) => r.clarity >= 3).length;
+    const diffs = {}; rs.forEach((r) => r.difficulty && (diffs[r.difficulty] = (diffs[r.difficulty] || 0) + 1));
+    return { ...x, n, fvi: n ? ok / n : null, top: Object.entries(diffs).sort((a, b) => b[1] - a[1])[0]?.[0] || '', comments: [...new Set(rs.map((r) => r.comment).filter(Boolean))] }; });
+  const rated = rows.filter((r) => r.n >= FVI_MIN), raters = new Set(face.map((r) => r.student_id)).size;
+  const sfvi = rated.length ? vmean(rated.map((r) => r.fvi)) : null, reword = rated.filter((r) => r.fvi < FVI_CUT).sort((a, b) => a.fvi - b.fvi);
+  // usability
+  const scores = sus.map((r) => susScore(r.answers)), mins = (k) => sus.map((r) => Number(r[k])).filter((x) => x > 0);
+  // accuracy
+  const pairs = rech.map((r) => ({ r, s: studentValues(c, r.family_id, r.member_code), fam: c.famById[r.family_id] })).filter((p) => p.s);
+  const meas = VMEAS.map(([k, lab]) => { const pr = pairs.filter((p) => p.r[k] !== null && p.s[k] !== null && p.s[k] !== undefined).map((p) => [Number(p.s[k]), Number(p.r[k])]);
+    const d = pr.map(([x, y]) => x - y); const md = d.length ? vmean(d) : null, sd = d.length > 1 ? vsd(d) : null;
+    return { k, lab, n: pr.length, md, sd, lo: sd !== null ? md - 1.96 * sd : null, hi: sd !== null ? md + 1.96 * sd : null, within: d.length ? d.filter((x) => Math.abs(x) <= VTOL[k] + 1e-9).length / d.length : null, icc: iccA(pr) }; });
+  const cats = VCAT.map(([k, lab, opts]) => { const pr = pairs.filter((p) => p.r[k] && p.s[k]).map((p) => [p.s[k], p.r[k]]);
+    return { k, lab, n: pr.length, po: pr.length ? pr.filter(([a, b]) => a === b).length / pr.length : null, kap: kappa(pr, opts) }; });
+  // students who need retraining: share of their measurements outside the limit
+  const perStu = {}; pairs.forEach((p) => VMEAS.forEach(([k]) => { if (p.r[k] === null || p.s[k] === null || p.s[k] === undefined) return; const sid = p.fam?.student_id; const o = (perStu[sid] = perStu[sid] || { n: 0, out: 0, items: [] }); o.n++; if (Math.abs(p.s[k] - p.r[k]) > VTOL[k] + 1e-9) { o.out++; o.items.push(`${p.fam.family_code} ${p.r.member_code} ${k.replace('_kg', '').replace('_cm', '')}: ${p.s[k]} vs ${p.r[k]}`); } }));
+  const retrain = Object.entries(perStu).filter(([, o]) => o.n >= 3 && o.out / o.n > 0.25).map(([sid, o]) => ({ name: c.studentById[sid]?.name || '', roll: c.studentById[sid]?.roll_number || '', ...o }));
+  const verdict = [
+    rated.length ? `Face validity: ${rated.length} questions rated by ${FVI_MIN} or more students (${raters} students took part); S-FVI/Ave ${f2(sfvi)}; ${reword.length} question${reword.length === 1 ? '' : 's'} to reword.` : `Face validity: not enough ratings yet (${raters} student${raters === 1 ? '' : 's'} so far; each question needs ${FVI_MIN}).`,
+    scores.length ? `Usability: mean SUS ${f2(vmean(scores), 1)} from ${scores.length} students (${vmean(scores) >= 68 ? 'above' : 'below'} the average benchmark of 68).` : 'Usability: no surveys yet.',
+    pairs.length ? `Accuracy: ${pairs.length} member re-checks. ${meas.filter((m) => m.icc !== null).map((m) => `${m.lab.split(' (')[0]} ICC ${f2(m.icc)}`).join('; ') || 'ICC needs 5+ pairs per measure'}.${retrain.length ? ` ${retrain.length} student(s) need retraining.` : ''}` : 'Accuracy: no mentor re-checks yet.'];
+  app.innerHTML = `<div class="row" style="justify-content:space-between;flex-wrap:wrap;gap:8px"><h1 style="margin:0">Questionnaire validity (pilot)</h1>
+      <div class="row" style="gap:8px">${canCheck ? '<a class="btn" href="#/recheck">+ Mentor re-check</a>' : ''}<button class="btn ghost" id="vcsv">Download data (CSV)</button><button class="btn ghost" onclick="window.print()">Print / save as PDF</button></div></div>
+    <p class="muted">${esc(S.institution?.institution_name || '')} · FAP questionnaire ${esc(S.formVersion)} · Report generated ${fmtDate(new Date())}. Updates live as students rate and mentors re-check.</p>
+    <div class="card note"><strong>Summary</strong><ul style="margin:6px 0 0 18px">${verdict.map((v) => `<li>${esc(v)}</li>`).join('')}</ul></div>
+
+    <div class="sec"><h2>1. Face validity: are the questions clear to students?</h2>
+      <p class="small muted">Each student rates clarity 1-4 in the app. I-FVI = share rating 3 or 4. A question needs ${FVI_MIN}+ ratings; below ${FVI_CUT.toFixed(2)} it is reworded and re-tested.</p>
+      <div class="kpis"><div class="kpi"><b>${raters}</b><span>students rated</span></div><div class="kpi"><b>${face.length}</b><span>ratings</span></div><div class="kpi"><b>${rated.length} / ${qs.length}</b><span>questions with ${FVI_MIN}+ ratings</span></div><div class="kpi"><b>${f2(sfvi)}</b><span>S-FVI/Ave</span></div><div class="kpi"><b>${reword.length}</b><span>to reword</span></div></div>
+      ${reword.length ? `<div class="tbox"><table><thead><tr><th>Code</th><th>Form</th><th>Question</th><th>Ratings</th><th>I-FVI</th><th>Main difficulty</th><th>Students' suggestions</th></tr></thead><tbody>
+        ${reword.map((r) => `<tr><td class="code">${esc(r.code)}</td><td>${esc(r.form)}</td><td>${esc(r.label)}</td><td>${r.n}</td><td>${f2(r.fvi)}</td><td>${esc(r.top)}</td><td class="small">${r.comments.slice(0, 3).map(esc).join('<br>')}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted small">No question below the cut-off yet.</p>'}
+      <details style="margin-top:8px"><summary>All questions (${qs.length})</summary><div class="tbox"><table><thead><tr><th>Code</th><th>Form</th><th>Question</th><th>Ratings</th><th>I-FVI</th></tr></thead><tbody>
+        ${rows.map((r) => `<tr><td class="code">${esc(r.code)}</td><td>${esc(r.form)}</td><td>${esc(r.label)}</td><td>${r.n}</td><td>${r.n ? f2(r.fvi) : '-'}</td></tr>`).join('')}</tbody></table></div></details></div>
+
+    <div class="sec"><h2>2. Usability of the app (SUS)</h2>
+      <div class="kpis"><div class="kpi"><b>${scores.length}</b><span>students</span></div><div class="kpi"><b>${scores.length ? f2(vmean(scores), 1) : '-'}</b><span>mean SUS (68 = average)</span></div>
+      <div class="kpi"><b>${scores.length ? pct(scores.filter((x) => x >= 68).length / scores.length) : '-'}</b><span>scored 68+</span></div>
+      <div class="kpi"><b>${mins('minutes_baseline').length ? Math.round(vmean(mins('minutes_baseline'))) : '-'}</b><span>min per baseline family</span></div>
+      <div class="kpi"><b>${mins('minutes_followup').length ? Math.round(vmean(mins('minutes_followup'))) : '-'}</b><span>min per follow-up</span></div></div>
+      ${sus.filter((r) => r.comment).length ? `<p class="small"><strong>Students' comments:</strong></p><ul class="small">${sus.filter((r) => r.comment).slice(0, 15).map((r) => `<li>${esc(r.comment)}</li>`).join('')}</ul>` : ''}</div>
+
+    <div class="sec"><h2>3. Accuracy of student data (mentor re-check)</h2>
+      <p class="small muted">Student value from the family's baseline compared with the mentor's independent measurement. Acceptable difference: BP ±5 mm Hg, weight ±0.5 kg, height ±1 cm, MUAC ±0.5 cm. ICC: two-way, absolute agreement (Koo &amp; Li 2016). Kappa: Landis &amp; Koch 1977.</p>
+      <div class="tbox"><table><thead><tr><th>Measure</th><th>Pairs</th><th>Mean difference (student minus mentor)</th><th>Limits of agreement</th><th>Within limit</th><th>ICC</th><th>Result</th></tr></thead><tbody>
+        ${meas.map((m) => `<tr><td>${esc(m.lab)}</td><td>${m.n}</td><td>${f2(m.md)}</td><td>${m.lo === null ? '-' : `${f2(m.lo)} to ${f2(m.hi)}`}</td><td>${pct(m.within)}</td><td>${f2(m.icc)}</td><td>${iccWord(m.icc)}</td></tr>`).join('')}</tbody></table></div>
+      <div class="tbox" style="margin-top:8px"><table><thead><tr><th>Answer</th><th>Pairs</th><th>Same answer</th><th>Kappa</th><th>Result</th></tr></thead><tbody>
+        ${cats.map((m) => `<tr><td>${esc(m.lab)}</td><td>${m.n}</td><td>${pct(m.po)}</td><td>${f2(m.kap)}</td><td>${kWord(m.kap)}</td></tr>`).join('')}</tbody></table></div>
+      ${retrain.length ? `<h3 style="margin-top:12px">Students to retrain (more than 25% of their measurements outside the limit)</h3><div class="tbox"><table><thead><tr><th>Student</th><th>Roll no.</th><th>Outside limit</th><th>Details (student vs mentor)</th></tr></thead><tbody>
+        ${retrain.map((r) => `<tr><td>${esc(r.name)}</td><td>${esc(r.roll)}</td><td>${r.out} of ${r.n}</td><td class="small">${r.items.slice(0, 6).map(esc).join('<br>')}</td></tr>`).join('')}</tbody></table></div>` : ''}
+      ${canCheck ? '<p style="margin-top:8px"><a href="#/recheck">Enter or view mentor re-checks</a></p>' : ''}</div>
+    <p class="small muted">Method: face validity index (I-FVI, S-FVI/Ave); System Usability Scale (Brooke 1996); ICC(2,1) and Bland-Altman limits of agreement; Cohen's kappa. Family members are shown by code only.</p>`;
+  $('#vcsv').onclick = () => {
+    const esc2 = (v) => (/[",\n]/.test(String(v ?? '')) ? `"${String(v).replace(/"/g, '""')}"` : String(v ?? ''));
+    const lines = ['section,form,code,question,n_or_student,value1,value2,value3,note'];
+    rows.forEach((r) => lines.push(['face_validity', r.form, r.code, r.label, r.n, r.n ? r.fvi.toFixed(2) : '', r.top, '', r.comments.join(' | ')].map(esc2).join(',')));
+    sus.forEach((r) => lines.push(['sus', '', '', '', c.studentById[r.student_id]?.roll_number || '', susScore(r.answers), r.minutes_baseline ?? '', r.minutes_followup ?? '', r.comment || ''].map(esc2).join(',')));
+    pairs.forEach((p) => [...VMEAS.map(([k]) => k), ...VCAT.map(([k]) => k)].forEach((k) => { if (p.r[k] === null && (p.s[k] === null || p.s[k] === undefined)) return; lines.push(['recheck', p.fam?.family_code || '', p.r.member_code, k, p.fam?.student?.roll_number || '', p.s[k] ?? '', p.r[k] ?? '', p.r.recheck_date, `baseline ${p.s.date}`].map(esc2).join(',')); }));
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8' })); a.download = `FAP_validity_data_${localISO()}.csv`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  };
+}
+
 async function route() {
   if (!S.me) { const { data: { session } } = await sb.auth.getSession(); if (!session) return viewLogin(); }
   const h = location.hash.replace(/^#\/?/, '');
@@ -962,6 +1120,8 @@ async function route() {
     if (page === 'analytics') return await viewAnalytics();
     if (page === 'manage') return await viewManage();
     if (page === 'logbook') return await viewLogbook();
+    if (page === 'validity') return await viewValidity();
+    if (page === 'recheck') return await viewRecheck();
     if (page === 'password') return viewPassword(false);
     if (isIA() && !isHOD() && !S.roles.includes('FACULTY') && !S.roles.includes('AUDITOR')) return await viewManage();
     return await viewHome();
@@ -981,7 +1141,7 @@ async function start() {
     $('#tabManage').hidden = !canManage();
     $('#tabAnalytics').hidden = !S.roles.some((r) => ['FACULTY', 'HOD', 'AUDITOR'].includes(r));
     const reviewer = S.roles.some((r) => ['FACULTY', 'HOD', 'AUDITOR'].includes(r));
-    document.querySelectorAll('[data-tab="home"],[data-tab="students"],[data-tab="referrals"],[data-tab="logbook"]').forEach((a) => (a.hidden = !reviewer));
+    document.querySelectorAll('[data-tab="home"],[data-tab="students"],[data-tab="referrals"],[data-tab="logbook"],[data-tab="validity"]').forEach((a) => (a.hidden = !reviewer));
     window.onhashchange = route;
     if (S.me.must_change_password) return viewPassword(true);
     if (!(await mfaGate())) return;

@@ -89,7 +89,7 @@ window.addEventListener('offline', setChip);
 async function loadAll(force) {
   if (online()) {
     try {
-      const [families, members, consents, baselines, visits, reviews, referrals, forms, evidence, profile] = await Promise.all([
+      const [families, members, consents, baselines, visits, reviews, referrals, forms, evidence, profile, face, sus] = await Promise.all([
         qAll(sb.from('families').select('family_id, institution_id, family_code, village_or_locality, phc_name, consent_status, enrolment_status, slot_no'), 'family_id'),
         qAll(sb.from('family_members').select('family_member_id, family_id, member_code, full_name, sex, date_of_birth, relationship_to_head, is_active'), 'family_member_id'),
         qAll(sb.from('consent_records').select('consent_id, family_id, consent_version, consent_status, consent_date, recorded_at, notice_language, guardian_consent_minors, research_opt_in, consenter_name, photo_location_consent').order('recorded_at', { ascending: false }), 'consent_id'),
@@ -99,9 +99,11 @@ async function loadAll(force) {
         qAll(sb.from('referrals').select('referral_id, family_id, referral_date, referral_reason, referred_to, status'), 'referral_id'),
         qAll(sb.from('form_versions').select('form_version_id, institution_id, form_code, module_code, version_label, status, form_schema'), 'form_version_id'),
         qAll(sb.from('competency_evidence').select('evidence_id, family_id, activity_type, activity_date, competency, phase, evidence_type, description, attachment, attachment_consent, reflection, status, mentor_rating, mentor_feedback, reviewed_at'), 'evidence_id').catch(() => []),
-        q(sb.rpc('fap_my_profile')).catch(() => null)
+        q(sb.rpc('fap_my_profile')).catch(() => null),
+        q(sb.from('validity_face').select('form_code, question_code, clarity, difficulty, comment')).catch(() => []),
+        q(sb.from('validity_sus').select('answers, minutes_baseline, minutes_followup, phone_type, comment, submitted_at')).catch(() => [])
       ]);
-      S.data = { families, members, consents, baselines, visits, reviews, referrals, evidence, profile, loadedAt: new Date().toISOString() };
+      S.data = { families, members, consents, baselines, visits, reviews, referrals, evidence, profile, face, sus: sus[0] || null, loadedAt: new Date().toISOString() };
       S.forms = buildForms(forms);
       await putEnc('cache', { me: S.me, student: S.student, data: S.data, forms: S.forms });
       return;
@@ -120,11 +122,11 @@ function buildForms(rows0) {
   const own = rows0.filter((r) => r.institution_id); // a college with its own approved forms uses only those
   const rows = own.length ? own : rows0.filter((r) => !r.institution_id);
   const pick = (code, mod) => rows.filter((r) => r.form_code === code && (r.module_code || null) === (mod || null)).sort((a, b) => (a.status === 'ACTIVE' ? -1 : 1))[0];
-  const B = pick('BASELINE'), F = pick('FOLLOWUP');
+  const B = pick('BASELINE'), F = pick('FOLLOWUP'), O = pick('OUTCOME');
   const modules = rows.filter((r) => r.form_code === 'MODULE').map((r) => ({ code: r.module_code, title: r.form_schema.title, questions: r.form_schema.questions }));
   const v2 = B?.form_schema?.engine === 2;
   const allQ = (B?.form_schema.questions || []).concat(modules.flatMap((m) => m.questions));
-  return { baselineId: B?.form_version_id, baseline: B?.form_schema.questions || [], followupId: F?.form_version_id, followup: F?.form_schema.questions || [], modules, v2,
+  return { baselineId: B?.form_version_id, baseline: B?.form_schema.questions || [], followupId: F?.form_version_id, followup: F?.form_schema.questions || [], outcome: O?.form_schema.questions || [], version: B?.version_label || '', modules, v2,
     R: v2 ? roleMap(allQ, {}) : { ...V1ROLE }, FR: F?.form_schema?.engine === 2 ? roleMap(F.form_schema.questions, {}) : { ...V1FROLE } };
 }
 const R = () => S.forms.R || V1ROLE;
@@ -575,6 +577,7 @@ function viewHome() {
     ${(() => { const ev = S.data.evidence || []; const ver = ev.filter((e) => e.status === 'VERIFIED').length, ret = ev.filter((e) => e.status === 'RETURNED' || e.status === 'NEEDS_REPEAT').length;
       return `<a class="card" href="#/logbook" style="display:block;margin-top:14px;text-decoration:none;color:inherit"><strong>My competency logbook</strong>
       <div class="small muted" style="margin-top:4px">${ev.length} entr${ev.length === 1 ? 'y' : 'ies'} · ${ver} verified by mentor${ret ? ` · <span style="color:#b3261e">${ret} to correct</span>` : ''}</div></a>`; })()}
+    ${validityCard()}
     <p class="small muted" style="margin-top:16px">Data last refreshed: ${fmtDate(S.data.loadedAt)} · v${esc(APP_VERSION)} · <a href="#/sync">Sync and settings</a></p>`;
 }
 
@@ -929,6 +932,94 @@ start();
 
 // ---------------- router and start ----------------
 
+
+// ---------------- pilot validity: question clarity (face validity) and app usability (SUS) ----------------
+const FV_VER = () => 'v' + (S.forms.version || '2.1');
+const RATE_SETS = () => [
+  ['BASELINE', 'Baseline family assessment', S.forms.baseline.filter((q) => q.type !== 'computed').map((q) => ({ ...q, form: 'BASELINE' }))],
+  ['FOLLOWUP', 'Follow-up visit', S.forms.followup.filter((q) => q.type !== 'computed').map((q) => ({ ...q, form: 'FOLLOWUP' }))],
+  ['OUTCOME', 'Annual outcome review', (S.forms.outcome || []).filter((q) => q.type !== 'computed').map((q) => ({ ...q, form: 'OUTCOME' }))],
+  ['MODULES', 'Life-stage modules', S.forms.modules.flatMap((m) => m.questions.filter((q) => q.type !== 'computed').map((q) => ({ ...q, form: m.code, section: `${m.code}: ${q.section || m.title}` })))],
+].filter(([, , qs]) => qs.length);
+const CLARITY = [[1, 'Not clear'], [2, 'Somewhat'], [3, 'Quite clear'], [4, 'Very clear']];
+const DIFFS = ['Wording unclear', 'Medical word not understood', 'Family cannot answer', 'Sensitive question', 'Options missing', 'Takes too long'];
+const SUS_ITEMS = ['I think that I would like to use the FAP app frequently.', 'I found the FAP app unnecessarily complex.', 'I thought the FAP app was easy to use.',
+  'I think that I would need the support of a technical person to be able to use the FAP app.', 'I found the various functions in the FAP app were well integrated.',
+  'I thought there was too much inconsistency in the FAP app.', 'I would imagine that most people would learn to use the FAP app very quickly.',
+  'I found the FAP app very cumbersome to use.', 'I felt very confident using the FAP app.', 'I needed to learn a lot of things before I could get going with the FAP app.'];
+const faceKey = (form, code) => `${form}|${code}`;
+function validityCard() {
+  if (!S.forms?.v2) return '';
+  const total = RATE_SETS().reduce((p, [, , qs]) => p + qs.length, 0), done = (S.data.face || []).length;
+  return `<div class="card" style="margin-top:14px"><strong>Pilot feedback: is the questionnaire clear?</strong>
+    <div class="small muted" style="margin:4px 0 10px">Rate how clear each question was when you used it with a family. Your answers help the department improve the forms. Needs internet.</div>
+    <div class="small">Questions rated: <strong>${done} of ${total}</strong> · App survey: <strong>${S.data.sus ? 'done' : 'not done'}</strong></div>
+    <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">${RATE_SETS().map(([k, t, qs]) => { const n = qs.filter((q) => (S.data.face || []).some((r) => r.form_code === q.form && r.question_code === q.code)).length; return `<a class="btn ghost" href="#/rate/${k}">${esc(t)} (${n}/${qs.length})</a>`; }).join('')}
+    <a class="btn ${S.data.sus ? 'ghost' : ''}" href="#/sus">App usability survey</a></div></div>`;
+}
+function viewRate(key) {
+  const set = RATE_SETS().find(([k]) => k === key);
+  if (!set) { location.hash = '#/'; return; }
+  const [, title, qs] = set;
+  head('Rate question clarity', title, '#/');
+  const mine = Object.fromEntries((S.data.face || []).map((r) => [faceKey(r.form_code, r.question_code), r]));
+  let sec = null, html = `<p class="muted small">For each question: how clear was it to you and to the family? 1 = not clear, 4 = very clear. If you choose 1 or 2, say what was difficult. Skip a question you have not used yet.</p>`;
+  qs.forEach((q) => {
+    if (q.section !== sec) { sec = q.section; html += `<div class="sec-h">${esc(sec || '')}</div>`; }
+    const r = mine[faceKey(q.form, q.code)] || {};
+    html += `<div class="q" data-fk="${esc(faceKey(q.form, q.code))}"><span class="lab"><span class="code">${esc(q.code)}</span>${esc(q.label)}</span>
+      <div class="pills" role="radiogroup" aria-label="Clarity">${CLARITY.map(([v, t]) => `<label><input type="radio" name="c|${esc(faceKey(q.form, q.code))}" value="${v}" ${r.clarity === v ? 'checked' : ''}>${v} ${t}</label>`).join('')}</div>
+      <div class="fx" ${r.clarity && r.clarity <= 2 ? '' : 'hidden'} style="margin-top:6px"><select class="fd"><option value="">What was difficult?</option>${DIFFS.map((d) => `<option ${r.difficulty === d ? 'selected' : ''}>${d}</option>`).join('')}</select>
+      <input class="fc" maxlength="300" placeholder="Suggested wording (optional)" value="${esc(r.comment || '')}" style="margin-top:6px"></div></div>`;
+  });
+  html += `<button class="btn full" id="rsave" style="margin-top:14px">Save my ratings</button>`;
+  app.innerHTML = `<div id="rwrap">${html}</div>`;
+  $('#rwrap').addEventListener('change', (e) => { const box = e.target.closest('.q'); if (e.target.type === 'radio' && box) $('.fx', box).hidden = Number(e.target.value) > 2; });
+  $('#rsave').onclick = async () => {
+    if (!online()) return toast('Saving ratings needs internet. Your choices stay on screen; try again when connected.');
+    const rows = [];
+    $$('.q[data-fk]', app).forEach((b) => {
+      const c = Number($('input[type=radio]:checked', b)?.value || 0); if (!c) return;
+      const [form, code] = b.dataset.fk.split('|');
+      rows.push({ institution_id: S.me.institution_id, student_id: S.student.student_id, form_version: FV_VER(), form_code: form, question_code: code, clarity: c,
+        difficulty: c <= 2 ? ($('.fd', b).value || null) : null, comment: c <= 2 ? ($('.fc', b).value.trim().slice(0, 300) || null) : null, rated_at: new Date().toISOString() });
+    });
+    if (!rows.length) return toast('Rate at least one question first');
+    $('#rsave').disabled = true;
+    try {
+      for (let i = 0; i < rows.length; i += 200) await q(sb.from('validity_face').upsert(rows.slice(i, i + 200), { onConflict: 'student_id,form_version,form_code,question_code' }));
+      const map = Object.fromEntries((S.data.face || []).map((r) => [faceKey(r.form_code, r.question_code), r]));
+      rows.forEach((r) => (map[faceKey(r.form_code, r.question_code)] = r)); S.data.face = Object.values(map);
+      await putEnc('cache', { me: S.me, student: S.student, data: S.data, forms: S.forms });
+      toast(`Saved ${rows.length} rating${rows.length > 1 ? 's' : ''}. Thank you.`); location.hash = '#/';
+    } catch (err) { toast(friendly(err)); $('#rsave').disabled = false; }
+  };
+}
+function viewSus() {
+  head('App usability survey', 'System Usability Scale, 10 statements', '#/');
+  const old = S.data.sus || {}; const a = old.answers || [];
+  app.innerHTML = `<p class="muted small">Answer after you have used the app with at least one family. 1 = strongly disagree, 5 = strongly agree.</p>
+    ${SUS_ITEMS.map((t, i) => `<div class="q"><span class="lab"><span class="code">Q${i + 1}</span>${esc(t)}</span><div class="pills" role="radiogroup">${[1, 2, 3, 4, 5].map((v) => `<label><input type="radio" name="sus${i}" value="${v}" ${a[i] === v ? 'checked' : ''}>${v}</label>`).join('')}</div></div>`).join('')}
+    <div class="q"><span class="lab">About how many minutes did one baseline family take (all members)?</span><input id="mb" type="number" inputmode="numeric" min="1" max="600" value="${esc(old.minutes_baseline ?? '')}"></div>
+    <div class="q"><span class="lab">About how many minutes did one follow-up visit take?</span><input id="mf" type="number" inputmode="numeric" min="1" max="600" value="${esc(old.minutes_followup ?? '')}"></div>
+    <div class="q"><span class="lab">Phone used</span><div class="pills">${['Android', 'iPhone', 'Other'].map((x) => `<label><input type="radio" name="ph" value="${x}" ${old.phone_type === x ? 'checked' : ''}>${x}</label>`).join('')}</div></div>
+    <div class="q"><span class="lab">Anything else about the app or the forms? (optional)</span><textarea id="sc" rows="3" maxlength="500">${esc(old.comment || '')}</textarea></div>
+    <button class="btn full" id="ssave">Submit survey</button>`;
+  $('#ssave').onclick = async () => {
+    const ans = SUS_ITEMS.map((_, i) => Number($(`input[name="sus${i}"]:checked`)?.value || 0));
+    if (ans.some((x) => !x)) return toast('Please answer all 10 statements');
+    const num = (id) => { const v = $(id).value; return v === '' ? null : Number(v); };
+    const mb = num('#mb'), mf = num('#mf');
+    if ([mb, mf].some((x) => x !== null && !(x >= 1 && x <= 600))) return toast('Minutes must be between 1 and 600');
+    if (!online()) return toast('Submitting needs internet. Try again when connected.');
+    const row = { institution_id: S.me.institution_id, student_id: S.student.student_id, form_version: FV_VER(), answers: ans, minutes_baseline: mb, minutes_followup: mf,
+      phone_type: $('input[name="ph"]:checked')?.value || null, comment: $('#sc').value.trim() || null, submitted_at: new Date().toISOString() };
+    $('#ssave').disabled = true;
+    try { await q(sb.from('validity_sus').upsert(row, { onConflict: 'student_id,form_version' })); S.data.sus = row; await putEnc('cache', { me: S.me, student: S.student, data: S.data, forms: S.forms }); toast('Thank you. Survey saved.'); location.hash = '#/'; }
+    catch (err) { toast(friendly(err)); $('#ssave').disabled = false; }
+  };
+}
+
 // ---------------- competency logbook (ST01 to ST08) ----------------
 const COMPETENCIES = [
   ['FAP-C1', 'Family profile, history and examination of family members'], ['FAP-C2', 'Mobilize for screening camps; coordinate check-up / treatment'],
@@ -1009,6 +1100,8 @@ function route() {
     if (page === 'visitview') return viewVisitView(id);
     if (page === 'sync') return viewSync();
     if (page === 'logbook') return viewLogbook();
+    if (page === 'rate') return viewRate(id);
+    if (page === 'sus') return viewSus();
     if (page === 'addfamily') return viewAddFamily();
     if (page === 'evidence') return viewEvidence(id);
     return viewHome();

@@ -73,3 +73,10 @@ dialog::backdrop{background:rgba(19,33,31,.45)}
 #credit{font-weight:600}
 .btn.danger{background:#b42318;border-color:#b42318;color:#fff}
 .badge.ok{background:#e3f4ec;color:#0b6b3a}
+
+/* validity report tiles */
+.kpis { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
+.kpi { background: #fff; border: 1px solid #d9e1ea; border-radius: 10px; padding: 10px 14px; min-width: 120px; }
+.kpi b { display: block; font-size: 1.35rem; }
+.kpi span { font-size: .8rem; color: #5b6b7b; }
+@media print { #topbar, .tabs, .btn, details { display: none !important; } .tbox { overflow: visible !important; } }
