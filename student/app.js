@@ -4,7 +4,7 @@
 // using a non-exportable key held by the browser.
 import { createClient } from './vendor/supabase-2.119.2.js';
 import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js';
-import { CREDIT, brand, brandBlock, setBrand } from './brand.js';
+import { CREDIT, credit, brand, brandBlock, setBrand } from './brand.js';
 import * as NUT from './nutrition.js';
 import * as VAL from './validation.js';
 
@@ -611,7 +611,7 @@ async function downloadMyReport(btn) {
     if (T.paired.n) figs.push([C.svgBpChange(T, meta), 'Change in blood pressure at follow-up']);
     const images = [];
     if (P.persons) for (const [svg, title] of figs) { const { blob, w, h } = await svgToPng(svg); images.push({ title, data: new Uint8Array(await blob.arrayBuffer()), w, h }); }
-    const doc = await R.buildStudentReport(docx, D, { today, images });
+    const doc = await R.buildStudentReport(docx, D, { today, images, credit: credit() });
     const blob = await docx.Packer.toBlob(doc);
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `FAP_Student_Report_${D.student.roll_number || ''}_${today}.docx`;
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
@@ -906,7 +906,7 @@ function viewLogin(msg) {
     e.preventDefault(); $('#lb').disabled = true;
     const { error } = await sb.auth.signInWithPassword({ email: $('#em').value.trim(), password: $('#pw').value });
     if (error) return viewLogin(online() ? 'Sign-in failed: ' + error.message : 'You are offline. Sign in once with internet.');
-    $('#credit').textContent = CREDIT;
+    $('#credit').textContent = credit();
 start();
   };
 }
@@ -924,7 +924,7 @@ function viewSetPassword() {
     $('#pb').disabled = true;
     try {
       const { error } = await sb.auth.updateUser({ password: $('#p1').value }); if (error) throw error;
-      await q(sb.rpc('fap_password_changed')); toast('Password saved'); $('#credit').textContent = CREDIT;
+      await q(sb.rpc('fap_password_changed')); toast('Password saved'); $('#credit').textContent = credit();
 start();
     } catch (err) { toast(friendly(err)); $('#pb').disabled = false; }
   };
@@ -1185,5 +1185,5 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) { hiddenAt = Date.now(); return; }
   if (S.unlocked && hiddenAt && Date.now() - hiddenAt > LOCK_AFTER_MS) { S.unlocked = false; window.onhashchange = null; viewLock(); }
 });
-$('#credit').textContent = CREDIT;
+$('#credit').textContent = credit();
 start();

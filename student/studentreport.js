@@ -185,7 +185,7 @@ export async function buildStudentReport(docx, D0, opts = {}) {
   C.push(h1(`${n++}. Declaration and signatures`),
     p('I declare that the information in this report was collected by me during home visits to the families listed, with their consent, under the guidance of my faculty mentor.'),
     table(['Role', 'Name', 'Signature', 'Date'], [['Student', st.name || '', '', ''], ['Faculty mentor', D.mentor?.name || '', '', ''], ['Head of Department, Community Medicine', '', '', '']], [3200, 3000, 2000, 1438]),
-    p('Generated automatically by FAP Digital Health from records entered by the student and reviewed by the mentor. Designed and developed by Dr. Shankar Reddy Dudala & Dr. Rajeshwar Rao Alwala.', { italics: true, size: 15, color: INK2, before: 200 }));
+    p(`Generated automatically by FAP Digital Health from records entered by the student and reviewed by the mentor. ${opts.credit || 'Developed by Prof. Dr. Shankar Reddy Dudala and Prof. Dr. Rajeshwar Rao Alwala'}.`, { italics: true, size: 15, color: INK2, before: 200 }));
 
   return new Document({
     creator: 'FAP Digital Health', title: `FAP student report ${st.roll_number || ''} ${today}`,

@@ -1,6 +1,9 @@
 // College branding: from ?c=CODE in the link, else the college of the last signed-in user.
 import { BRANDS, CREDIT } from './config.js';
 export { CREDIT };
+// the credit for the active college (falls back to the general credit)
+export const credit = () => (BRANDS[brandCode()] || {}).credit || CREDIT;
+const showCredit = () => { try { const el = document.getElementById('credit'); if (el) el.textContent = credit(); } catch { /* no page */ } };
 let active = '';
 export function brandCode() {
   if (active) return active;
@@ -8,7 +11,7 @@ export function brandCode() {
   if (u) { setBrand(u.toUpperCase(), false); return u.toUpperCase(); }
   try { return localStorage.getItem('fap-brand') || ''; } catch { return ''; }
 }
-export function setBrand(code, signedIn = true) { if (code && signedIn) active = code; try { if (code) localStorage.setItem('fap-brand', code); } catch { /* storage blocked */ } }
+export function setBrand(code, signedIn = true) { if (code && signedIn) active = code; try { if (code) localStorage.setItem('fap-brand', code); } catch { /* storage blocked */ } showCredit(); }
 export const brand = () => BRANDS[brandCode()] || null;
 export const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 // Block for login screens: college logo + name, or nothing.

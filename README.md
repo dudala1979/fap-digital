@@ -7,4 +7,4 @@ Family Adoption Programme platform for MBBS students, faculty mentors and HODs o
 
 Data lives in Supabase and is protected by database access rules (RLS). This repository contains **no secrets and no personal data**: the key in `config.js` is a public publishable key by design.
 
-Developed by Dr. Shankar Reddy Dudala. Pilot version 0.2, 24 November 2026.
+Developed by Prof. Dr. Shankar Reddy Dudala and Prof. Dr. Rajeshwar Rao Alwala (PMRIMS version). BIMSR version developed by Prof. Dr. Shankar Reddy Dudala, Prof. Dr. Rajeshwar Rao Alwala, Dr Smiti Narain & Dr Mayank Raj. Updated 28 November 2026.
