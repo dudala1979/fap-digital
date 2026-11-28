@@ -2,9 +2,9 @@
 // Plain JavaScript, no build step. Talks to Supabase; the database access rules (RLS)
 // decide what each signed-in person can see. This file never bypasses them.
 import { createClient } from './vendor/supabase-2.119.2.js';
-import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.11';
-import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.11';
-import { FOODS } from './nutrition.js?v=0.4.11';
+import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.12';
+import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.12';
+import { FOODS } from './nutrition.js?v=0.4.12';
 
 // an invitation or password-reset email lands here with #access_token...&type=invite|recovery
 const FROM_EMAIL_LINK = /type=(invite|recovery)/.test(location.hash);
@@ -72,7 +72,7 @@ async function loadMe() {
 async function loadData(force) {
   if (S.cache.loaded && !force) return S.cache;
   const [students, users, families, members, baselines, visits, reviews, referrals, consents, evidence] = await Promise.all([
-    qAll(sb.from('students').select('student_id, user_id, roll_number, current_phase, is_active'), 'student_id'),
+    qAll(sb.from('students').select('student_id, user_id, roll_number, current_phase, is_active, family_limit, family_request_note, family_request_at'), 'student_id'),
     qAll(sb.from('app_users').select('user_id, full_name'), 'user_id'),
     qAll(sb.from('families').select('family_id, student_id, family_code, village_or_locality, phc_name, consent_status, enrolment_status, enrolled_on'), 'family_id'),
     qAll(sb.from('family_members').select('family_member_id, family_id, member_code, sex, date_of_birth, relationship_to_head, is_active'), 'family_member_id'),
@@ -212,6 +212,7 @@ async function viewHome() {
       <div class="card stat"><b>${queue.length}</b><span>Waiting for your review</span></div>
       <div class="card stat"><b>${openRef.length}</b><span>Open referrals</span></div>
     </div>
+    ${(() => { const r = isHOD() ? c.students.filter((x) => x.family_request_at).length : 0; return r ? `<div class="note sec"><a href="#/students"><strong>${r} student${r === 1 ? '' : 's'}</strong> asked to adopt more than the allowed families</a></div>` : ''; })()}
     ${(() => { const n = (c.evidence || []).filter((e) => e.status === 'SUBMITTED').length; return n ? `<div class="note sec"><a href="#/logbook"><strong>${n} competency logbook entr${n === 1 ? 'y' : 'ies'}</strong> waiting for your rating</a></div>` : ''; })()}
     <div class="sec"><h2>Review queue</h2>${queue.length ? `<div class="list">${queue.join('')}</div>` : '<div class="card muted">Nothing waiting. Well done.</div>'}</div>`;
 }
@@ -221,10 +222,18 @@ async function viewStudents() {
   const c = await loadData();
   const rows = c.students.map((s) => {
     const fams = c.families.filter((f) => f.student_id === s.student_id);
+    const lim = s.family_limit || 5;
+    const limBox = `<div class="small" style="margin-top:6px">Families ${fams.length} of ${lim} allowed${s.family_request_at ? ` · <span style="color:#b3261e"><strong>Requested more</strong> on ${fmtDate(s.family_request_at)}: ${esc(s.family_request_note || '')}</span>` : ''}
+      ${isHOD() ? ` · <button class="btn ghost" style="padding:2px 10px" data-lim="${s.student_id}" data-n="${Math.min(10, lim + 1)}" ${lim >= 10 ? 'disabled' : ''}>Allow one more</button>${s.family_request_at ? ` <button class="btn ghost" style="padding:2px 10px" data-lim="${s.student_id}" data-n="${lim}">Decline request</button>` : ''}` : ''}</div>`;
     return `<div class="card"><div class="row"><strong style="flex:1">${esc(s.name)}</strong><span class="small muted">Roll ${esc(s.roll_number)} · ${esc(s.current_phase || '')}</span><button class="btn ghost" data-report="student" data-sid="${s.student_id}">Word report</button></div>
+      ${limBox}
       <div class="list" style="margin-top:10px">${fams.map((f) => `<a class="item" href="#/family/${f.family_id}"><div class="grow"><strong>${esc(f.family_code)}</strong> <span class="small muted">${esc(f.village_or_locality || '')}</span></div>${badge(f.consent_status === 'GRANTED' ? f.enrolment_status : f.consent_status)}</a>`).join('') || '<p class="muted small">No families yet.</p>'}</div></div>`;
   }).join('');
   app.innerHTML = `<h1>Students</h1><p class="muted">${isHOD() ? 'All students of the college.' : 'Students currently assigned to you.'}</p><div class="list sec">${rows || '<div class="card muted">No students assigned.</div>'}</div>`;
+  app.querySelectorAll('[data-lim]').forEach((b) => (b.onclick = async () => {
+    b.disabled = true;
+    try { toast(await q(sb.rpc('fap_set_family_limit', { p_student: b.dataset.lim, p_limit: Number(b.dataset.n) }))); S.cache = {}; viewStudents(); } catch (e) { fail(e); b.disabled = false; }
+  }));
 }
 
 async function viewFamily(id) {
@@ -391,7 +400,7 @@ async function reportData() {
 async function downloadReport(kind, studentId) {
   toast('Preparing the Word report…');
   try {
-    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.11')]);
+    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.12')]);
     let D = await reportData();
     const st = D.students.find((s) => s.student_id === studentId);
     let extra = {};
@@ -428,7 +437,7 @@ app.addEventListener('click', (e) => {
 async function viewOverview() {
   setTab('overview');
   if (!isHOD() && !S.roles.includes('AUDITOR')) { location.hash = '#/'; return; }
-  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.11')]);
+  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.12')]);
   const A = R.computeAnalytics(D);
   const tbl = (rows) => `<div class="tbox"><table><thead><tr><th>Indicator</th><th>Number (%)</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td><strong>${esc(v)}</strong></td></tr>`).join('')}</tbody></table></div>`;
   app.innerHTML = `<div class="row"><div style="flex:1"><h1>College overview</h1><p class="muted">${esc(D.institution.institution_name || '')} · ${esc(D.institution.district || '-')}, ${esc(D.institution.state || '-')} · as of ${fmtDate(new Date())}</p></div>
@@ -458,7 +467,7 @@ const svgToPng = (svg, scale = 2) => new Promise((res, rej) => {
 const saveBlob = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); };
 const chartMeta = (D) => ({ place: `${D.institution.institution_name || ''}, ${D.institution.district || '-'}, ${D.institution.state || '-'}.`, source: `Source: FAP Digital Health, data as of ${fmtDate(new Date())}.` });
 async function analyticsPack() {
-  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.11')]);
+  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.12')]);
   const today = localISO(), f = S.af || {};
   const D = C.filterData(D0, f, today), fl = C.filterLabel(D0, f);
   const meta = chartMeta(D0); if (fl) meta.place = meta.place + ' ' + fl;

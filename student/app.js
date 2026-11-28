@@ -85,7 +85,7 @@ window.addEventListener('offline', setChip);
 async function loadAll(force) {
   if (online()) {
     try {
-      const [families, members, consents, baselines, visits, reviews, referrals, forms, evidence] = await Promise.all([
+      const [families, members, consents, baselines, visits, reviews, referrals, forms, evidence, profile] = await Promise.all([
         qAll(sb.from('families').select('family_id, institution_id, family_code, village_or_locality, phc_name, consent_status, enrolment_status, slot_no'), 'family_id'),
         qAll(sb.from('family_members').select('family_member_id, family_id, member_code, full_name, sex, date_of_birth, relationship_to_head, is_active'), 'family_member_id'),
         qAll(sb.from('consent_records').select('consent_id, family_id, consent_status, consent_date, recorded_at, notice_language, guardian_consent_minors, research_opt_in, consenter_name').order('recorded_at', { ascending: false }), 'consent_id'),
@@ -94,9 +94,10 @@ async function loadAll(force) {
         qAll(sb.from('faculty_reviews').select('review_id, family_id, visit_id, baseline_id, decision, feedback, reviewed_at').order('reviewed_at', { ascending: false }), 'review_id'),
         qAll(sb.from('referrals').select('referral_id, family_id, referral_date, referral_reason, referred_to, status'), 'referral_id'),
         qAll(sb.from('form_versions').select('form_version_id, institution_id, form_code, module_code, version_label, status, form_schema'), 'form_version_id'),
-        qAll(sb.from('competency_evidence').select('evidence_id, family_id, activity_type, activity_date, competency, phase, evidence_type, description, attachment, attachment_consent, reflection, status, mentor_rating, mentor_feedback, reviewed_at'), 'evidence_id').catch(() => [])
+        qAll(sb.from('competency_evidence').select('evidence_id, family_id, activity_type, activity_date, competency, phase, evidence_type, description, attachment, attachment_consent, reflection, status, mentor_rating, mentor_feedback, reviewed_at'), 'evidence_id').catch(() => []),
+        q(sb.rpc('fap_my_profile')).catch(() => null)
       ]);
-      S.data = { families, members, consents, baselines, visits, reviews, referrals, evidence, loadedAt: new Date().toISOString() };
+      S.data = { families, members, consents, baselines, visits, reviews, referrals, evidence, profile, loadedAt: new Date().toISOString() };
       S.forms = buildForms(forms);
       await putEnc('cache', { me: S.me, student: S.student, data: S.data, forms: S.forms });
       return;
@@ -408,6 +409,39 @@ const membersOf = (id) => S.data.members.filter((m) => m.family_id === id && m.i
 const baselineOf = (id) => S.data.baselines.find((b) => b.family_id === id);
 const latestConsent = (id) => S.data.consents.filter((c) => c.family_id === id).sort((a, b) => String(b.recorded_at || b.consent_date).localeCompare(String(a.recorded_at || a.consent_date)))[0];
 
+function profileCard() {
+  const p = S.data.profile || {};
+  const row = (k, v) => `<div style="display:flex;gap:8px;padding:3px 0"><span class="small muted" style="min-width:118px">${k}</span><strong style="flex:1">${esc(v || '-')}</strong></div>`;
+  return `<div class="card" style="margin-bottom:12px">${row('Student', p.student_name || S.me.full_name)}${row('College roll no.', p.roll_number || S.student?.roll_number)}
+    ${row('Year of admission', p.admission_year ? String(p.admission_year) : '')}${row('Phase', p.current_phase || S.student?.current_phase)}${row('Mentor', p.mentor_name || 'Not assigned yet')}</div>`;
+}
+function addFamilyBlock() {
+  const p = S.data.profile || {}; const lim = p.family_limit || 5; const n = S.data.families.length;
+  if (n < lim) return `<a class="btn full" href="#/addfamily" style="margin-top:12px">+ Add a family (${n} of ${lim})</a>`;
+  if (p.family_request_at) return `<div class="note info" style="margin-top:12px">You have ${n} of ${lim} families. Your request for more families was sent to the HOD on ${fmtDate(p.family_request_at)}.</div>`;
+  return `<div class="card" style="margin-top:12px"><div class="small muted">You have adopted ${n} of ${lim} families, the maximum allowed. To adopt more, ask your HOD.</div>
+    <button class="btn ghost full" id="askMore" style="margin-top:8px">Request HOD permission for more families</button></div>`;
+}
+function viewAddFamily() {
+  head('Add a family', 'You can adopt up to ' + ((S.data.profile || {}).family_limit || 5) + ' families', '#/');
+  if (!online()) { app.innerHTML = '<div class="card note">Adding a family needs internet once. Connect and try again; all other work can be done offline.</div>'; return; }
+  app.innerHTML = `<form id="af" class="card">
+    <p class="small muted">The family code (e.g. BIM-26-0007) is created automatically. Do not write names of family members here.</p>
+    <label class="lbl" for="av">Village / tola / locality</label><input id="av" required maxlength="120">
+    <label class="lbl" for="ap">PHC / sub-centre / HWC area</label><input id="ap" required maxlength="120">
+    <label class="lbl" for="aa">Landmark (optional)</label><input id="aa" maxlength="200">
+    <div class="bar"><button class="btn" id="afb">Add family</button></div></form>`;
+  $('#af').onsubmit = async (e) => {
+    e.preventDefault(); $('#afb').disabled = true;
+    try {
+      const batch = (S.data.profile || {}).batch_id;
+      const row = await q(sb.from('families').insert({ institution_id: S.me.institution_id, student_id: S.student.student_id, batch_id: batch, village_or_locality: $('#av').value.trim(), phc_name: $('#ap').value.trim(), address_text: $('#aa').value.trim() || null, enrolment_status: 'DRAFT' })
+        .select('family_id, institution_id, family_code, village_or_locality, phc_name, consent_status, enrolment_status, slot_no').single());
+      S.data.families.push(row); await putEnc('cache', { me: S.me, student: S.student, data: S.data, forms: S.forms });
+      toast(`Family ${row.family_code} added. Record household consent next.`); location.hash = '#/family/' + row.family_id;
+    } catch (err) { toast(friendly(err)); $('#afb').disabled = false; }
+  };
+}
 function viewHome() {
   head('My families', `${S.me.full_name} · ${S.student?.current_phase || ''}`);
   const returned = S.data.baselines.filter((b) => b.status === 'RETURNED').length + S.data.visits.filter((v) => v.status === 'RETURNED').length;
@@ -418,7 +452,9 @@ function viewHome() {
     return `<a class="item" href="#/family/${f.family_id}"><div class="grow"><strong>${esc(f.family_code)}</strong> <span class="small muted">${esc(f.village_or_locality || '')}</span><div class="small">${esc(next)}</div></div>${badge(st)}</a>`;
   }).join('');
   app.innerHTML = `${returned ? `<div class="note" style="margin-bottom:12px"><strong>${returned} record${returned > 1 ? 's' : ''} returned by your mentor.</strong> Open the family to see the note.</div>` : ''}
-    <div class="list">${rows || '<div class="card muted">No families allotted yet. Your HOD allots families.</div>'}</div>
+    ${profileCard()}
+    <div class="list">${rows || '<div class="card muted">No families yet. Add the families you have adopted (up to 5).</div>'}</div>
+    ${addFamilyBlock()}
     ${S.data.families.length ? (() => { const v = S.data.families.filter((f) => baselineOf(f.family_id)?.status === 'VERIFIED').length, n = Math.max(5, S.data.families.length);
       return `<div class="card" style="margin-top:14px"><strong>My FAP report</strong>
       <div class="small muted" style="margin:4px 0 10px">${v >= n ? 'All family baselines are verified. Your final report is ready.' : `Interim report: ${v} of ${n} family baselines verified by your mentor. It becomes final when all are verified.`} Made automatically from your records; family members appear by code only.</div>
@@ -467,6 +503,12 @@ async function downloadMyReport(btn) {
   } catch (e) { toast('Could not make the report: ' + friendly(e)); } finally { btn.disabled = false; }
 }
 document.addEventListener('click', (e) => { const b = e.target.closest('#myReport'); if (b) downloadMyReport(b); });
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest('#askMore'); if (!b) return;
+  if (!online()) return toast('Needs internet');
+  const note = prompt('Why do you need more families? (for your HOD)'); if (!note || !note.trim()) return;
+  try { toast(await q(sb.rpc('fap_request_more_families', { p_note: note.trim() }))); await loadAll(true); route(); } catch (err) { toast(friendly(err)); }
+});
 
 function viewFamily(id) {
   const f = famOf(id); if (!f) return (app.innerHTML = '<div class="card">Family not found.</div>');
@@ -839,6 +881,7 @@ function route() {
     if (page === 'visitview') return viewVisitView(id);
     if (page === 'sync') return viewSync();
     if (page === 'logbook') return viewLogbook();
+    if (page === 'addfamily') return viewAddFamily();
     if (page === 'evidence') return viewEvidence(id);
     return viewHome();
   } catch (e) { console.error(e); app.innerHTML = `<div class="note">Something went wrong: ${esc(e.message)}</div>`; }
