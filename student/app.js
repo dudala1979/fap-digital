@@ -141,6 +141,12 @@ const viewStd = (ad) => (ad?.v === 2 ? (ad.std || {}) : ad || {});
 
 // ---------------- writes: online first, queue when offline ----------------
 async function perform(op) {
+  if (op.action === 'upload') {
+    const blob = await (await fetch(op.data)).blob();
+    const { error } = await sb.storage.from('visit-proofs').upload(op.path, blob, { upsert: true, contentType: 'image/jpeg' });
+    if (error) throw error;
+    return;
+  }
   if (op.action === 'insert') {
     const { error } = await sb.from(op.table).insert(op.values);
     if (error && error.code !== '23505') throw error; // 23505 = already uploaded earlier
@@ -150,6 +156,7 @@ async function perform(op) {
   }
 }
 function applyLocal(op) {
+  if (op.action === 'upload') return;
   const arr = (S.data[ARR[op.table]] ||= []);
   if (op.action === 'insert') arr.push({ ...op.values, _queued: op.queued || false });
   else arr.filter((r) => Object.entries(op.match).every(([k, v]) => r[k] === v)).forEach((r) => Object.assign(r, op.values));
@@ -422,6 +429,56 @@ function addFamilyBlock() {
   return `<div class="card" style="margin-top:12px"><div class="small muted">You have adopted ${n} of ${lim} families, the maximum allowed. To adopt more, ask your HOD.</div>
     <button class="btn ghost full" id="askMore" style="margin-top:8px">Request HOD permission for more families</button></div>`;
 }
+
+// ---------------- proof of visit: one photo (max 50 KB) + geotag ----------------
+async function compressTo50KB(file) {
+  const img = await createImageBitmap(file);
+  let side = 960, q = 0.72, url = '';
+  for (let i = 0; i < 14; i++) {
+    const k = Math.min(1, side / Math.max(img.width, img.height));
+    const c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    url = c.toDataURL('image/jpeg', q);
+    if ((url.length - 23) * 0.75 <= 50 * 1024) break;
+    if (q > 0.45) q -= 0.08; else side = Math.round(side * 0.82);
+  }
+  return url;
+}
+const kbOf = (url) => Math.round(((url.length - 23) * 0.75) / 1024);
+function proofHTML(old) {
+  return `<div class="q" id="proofBox" style="border:2px dashed #9fb3c8;border-radius:12px;padding:12px;margin-top:14px">
+    <span class="lab">Proof of visit <span class="req">*</span></span>
+    <div class="small muted">One photo of the visit (house entrance or the activity). Avoid faces unless the family agrees. It is reduced to 50 KB automatically.</div>
+    <input type="file" id="pfPhoto" accept="image/*" capture="environment" style="margin-top:8px">
+    <div id="pfPrev" style="margin-top:8px">${old?.path ? '<span class="small">Photo already attached. Take a new one only to replace it.</span>' : ''}</div>
+    <div class="small" id="pfGeo" style="margin-top:6px">Location: ${old?.lat ? `${old.lat}, ${old.lng} (saved)` : 'getting location…'}</div>
+    <label class="chk" style="margin-top:6px"><input type="checkbox" id="pfOk" ${old?.path ? 'checked' : ''}><span>The family agreed to this photo and location being recorded for FAP.</span></label></div>`;
+}
+function wireProof(old) {
+  const st = { url: null, lat: old?.lat ?? null, lng: old?.lng ?? null, acc: old?.acc ?? null };
+  const geo = () => {
+    if (!navigator.geolocation) { $('#pfGeo').textContent = 'Location: not available on this phone'; return; }
+    navigator.geolocation.getCurrentPosition((p) => { st.lat = +p.coords.latitude.toFixed(5); st.lng = +p.coords.longitude.toFixed(5); st.acc = Math.round(p.coords.accuracy); $('#pfGeo').innerHTML = `Location: <strong>${st.lat}, ${st.lng}</strong> (±${st.acc} m)`; },
+      () => { $('#pfGeo').innerHTML = 'Location: not available (allow location for this app, then tap <a href="#" id="pfRetry">try again</a>)'; const r = $('#pfRetry'); if (r) r.onclick = (e) => { e.preventDefault(); geo(); }; },
+      { enableHighAccuracy: true, timeout: 20000, maximumAge: 60000 });
+  };
+  if (!old?.lat) geo();
+  $('#pfPhoto').onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    $('#pfPrev').textContent = 'Reducing photo…';
+    try { st.url = await compressTo50KB(f); $('#pfPrev').innerHTML = `<img src="${st.url}" alt="Proof of visit" style="max-width:180px;border-radius:8px"> <span class="small muted">${kbOf(st.url)} KB</span>`; if (!st.lat) geo(); }
+    catch { $('#pfPrev').textContent = 'Could not read the photo. Try again.'; }
+  };
+  // returns the _proof object for the record, after queuing the photo upload; null if blocked
+  return async (famId, recKey, required) => {
+    const has = st.url || old?.path;
+    if (required && !has) { toast('Add one photo as proof of visit'); $('#proofBox').scrollIntoView({ block: 'center' }); return null; }
+    if (has && !$('#pfOk').checked) { toast('Tick the family agreement box for the photo'); $('#proofBox').scrollIntoView({ block: 'center' }); return null; }
+    let path = old?.path || null;
+    if (st.url) { path = `${S.me.institution_id}/${famId}/${recKey}.jpg`; await write({ table: '__upload', action: 'upload', path, data: st.url }); }
+    return has ? { path, lat: st.lat, lng: st.lng, acc: st.acc, at: new Date().toISOString(), kb: st.url ? kbOf(st.url) : old?.kb ?? null } : undefined;
+  };
+}
 function viewAddFamily() {
   head('Add a family', 'You can adopt up to ' + ((S.data.profile || {}).family_limit || 5) + ' families', '#/');
   if (!online()) { app.innerHTML = '<div class="card note">Adding a family needs internet once. Connect and try again; all other work can be done offline.</div>'; return; }
@@ -624,7 +681,7 @@ function viewBaseline(id) {
   const mq = Q.filter((q) => q.level === 'Member' && !isWrap(q) && (S.forms.v2 || !SKIP_IN_BASELINE.has(q.code)));
   const ret = S.data.reviews.find((r) => r.baseline_id === b?.baseline_id && r.decision === 'RETURNED');
   if (!editable) {
-    const show = (o) => Object.entries(o || {}).filter(([k]) => k !== 'std' && k !== 'v').map(([k, v]) => [k, typeof v === 'string' && v.startsWith('data:image/') ? '[sketch saved]' : Array.isArray(v) && v.length && typeof v[0] === 'object' ? v.map((r) => `${(NUT.FOODS.find((f) => f.id === r.f) || {}).name || r.f} ${r.g} g`) : v && typeof v === 'object' && !Array.isArray(v) ? Object.entries(v).map(([a, b]) => `${a}: ${b}`) : v]).map(([k, v]) => `<tr><td class="small muted">${esc(k)}</td><td>${esc((Q.find((q) => q.code === k) || S.forms.modules.flatMap((m) => m.questions).find((q) => q.code === k) || {}).label || k)}</td><td>${esc(Array.isArray(v) ? v.join(', ') : v)}</td></tr>`).join('');
+    const show = (o) => Object.entries(o || {}).filter(([k]) => k !== 'std' && k !== 'v' && k !== '_proof').map(([k, v]) => [k, typeof v === 'string' && v.startsWith('data:image/') ? '[sketch saved]' : Array.isArray(v) && v.length && typeof v[0] === 'object' ? v.map((r) => `${(NUT.FOODS.find((f) => f.id === r.f) || {}).name || r.f} ${r.g} g`) : v && typeof v === 'object' && !Array.isArray(v) ? Object.entries(v).map(([a, b]) => `${a}: ${b}`) : v]).map(([k, v]) => `<tr><td class="small muted">${esc(k)}</td><td>${esc((Q.find((q) => q.code === k) || S.forms.modules.flatMap((m) => m.questions).find((q) => q.code === k) || {}).label || k)}</td><td>${esc(Array.isArray(v) ? v.join(', ') : v)}</td></tr>`).join('');
     app.innerHTML = `<div class="note info">${badge(b.status)} This baseline is ${b.status === 'VERIFIED' ? 'verified by your mentor' : 'with your mentor for review'} and cannot be edited.</div>
       <h2>Household</h2><div class="card"><table>${show(data.household)}</table></div>
       ${Object.entries(data.members || {}).map(([k, v]) => `<h2>Member ${esc(k)}</h2><div class="card"><table>${show(v)}</table></div>`).join('')}
@@ -640,6 +697,7 @@ function viewBaseline(id) {
     S.forms.modules.forEach((mod) => { html += mod.questions.map((q) => field({ ...q, label: q.label }, `m:${m.member_code}`, ans[q.code], 'mod')).join(''); });
   });
   html += `<div class="sec-h">End of visit</div>` + wr.map((q) => field(q, 'wrap_up', data.wrap_up?.[q.code])).join('');
+  html += proofHTML(b?.assessment_data?._proof);
   html += `<div class="bar"><button class="btn ghost" id="draft">Save draft</button><button class="btn" id="submit">Submit to mentor</button></div>`;
   app.innerHTML = `<form id="bf" novalidate>${html}</form>`;
   const root = $('#bf');
@@ -660,12 +718,16 @@ function viewBaseline(id) {
     }
     return out;
   };
+  const proof = wireProof(b?.assessment_data?._proof);
   const save = async (status) => {
     if (status === 'SUBMITTED' && !validate(root)) return;
     const d = collect();
     try {
+      const bid = b?.baseline_id || uuid();
+      const pf = await proof(id, 'baseline-' + bid, status === 'SUBMITTED'); if (pf === null) return;
+      if (pf) d._proof = pf;
       let r;
-      if (!b) r = await write({ table: 'baseline_assessments', action: 'insert', values: { baseline_id: uuid(), institution_id: f.institution_id, family_id: id, assessment_date: today(), status, assessment_data: d, form_version_id: S.forms.baselineId, submitted_by: S.me.user_id } });
+      if (!b) r = await write({ table: 'baseline_assessments', action: 'insert', values: { baseline_id: bid, institution_id: f.institution_id, family_id: id, assessment_date: today(), status, assessment_data: d, form_version_id: S.forms.baselineId, submitted_by: S.me.user_id } });
       else r = await write({ table: 'baseline_assessments', action: 'update', match: { baseline_id: b.baseline_id }, values: { status, assessment_data: d, submitted_by: S.me.user_id } });
       const r0 = R();
       if (status === 'SUBMITTED' && d.wrap_up[r0.ref_flag] === 'Yes' && b?.status !== 'RETURNED') {
@@ -703,11 +765,13 @@ function viewVisit(id, existing) {
     html += field(qq, 'visit', prev[q.code]);
   });
   html += `<div class="q" data-scope="ref" data-q="R1" data-show="" data-req="0" id="refbox" hidden><span class="lab">Referral: reason and place</span><input data-nm="ref|R1" placeholder="Reason"><input data-nm="ref|R2" placeholder="Referred to (facility)" style="margin-top:8px"></div>`;
+  html += proofHTML(existing?.observations?._proof);
   html += `<div class="bar"><a class="btn ghost" href="#/family/${id}">Cancel</a><button class="btn" id="submit">Submit to mentor</button></div>`;
   app.innerHTML = `<form id="vf" novalidate>${html}</form>`;
   const root = $('#vf');
   const ctxOf = (sc, ans) => ({ age: null, months: null, sex: null, ans });
   wireForm(root, ctxOf);
+  const proof = wireProof(existing?.observations?._proof);
   root.addEventListener('change', () => { $('#refbox').hidden = readScope(root, 'visit')[fr.ref_flag] !== 'Yes'; });
   $('#submit').onclick = async (e) => {
     e.preventDefault(); if (!validate(root)) return;
@@ -721,9 +785,12 @@ function viewVisit(id, existing) {
     const n = existing?.visit_number || (Math.max(1, ...S.data.visits.filter((x) => x.family_id === id).map((x) => x.visit_number || 1)) + 1);
     const values = { visit_date: v[fr.visit_date] || today(), visit_number: n, academic_phase: S.student?.current_phase || null, visit_purpose: 'Follow-up', persons_contacted: v[fr.members_met] || [], observations: obs, health_education: v[fr.health_ed] || [], referral_needed: v[fr.ref_flag] === 'Yes', next_followup_date: v[fr.next_date] || null, status: 'SUBMITTED', submitted_by: S.me.user_id, submitted_at: new Date().toISOString(), form_version_id: S.forms.followupId };
     try {
+      const vid = existing?.visit_id || uuid();
+      const pf = await proof(id, 'visit-' + vid, true); if (pf === null) return;
+      if (pf) obs._proof = pf;
       const r = existing
         ? await write({ table: 'visit_records', action: 'update', match: { visit_id: existing.visit_id }, values })
-        : await write({ table: 'visit_records', action: 'insert', values: { visit_id: uuid(), institution_id: f.institution_id, family_id: id, ...values } });
+        : await write({ table: 'visit_records', action: 'insert', values: { visit_id: vid, institution_id: f.institution_id, family_id: id, ...values } });
       const rs = v[fr.ref_status];
       if (openRef && (rs === 'Completed' || rs === 'Refused')) await write({ table: 'referrals', action: 'update', match: { referral_id: openRef.referral_id }, values: { status: rs === 'Completed' ? 'COMPLETED' : 'CLOSED', followup_notes: `Visit ${n}: ${rs}` } });
       if (v[fr.ref_flag] === 'Yes') { const rr = readScope(root, 'ref'); await write({ table: 'referrals', action: 'insert', values: { referral_id: uuid(), institution_id: f.institution_id, family_id: id, referral_date: today(), referral_reason: rr.R1 || 'See visit ' + n, referred_to: rr.R2 || null, status: 'OPEN', created_by: S.me.user_id } }); }
@@ -739,14 +806,14 @@ function viewVisitView(vid) {
   const lab = (k) => (S.forms.followup.find((q) => q.code === k) || {}).label || k;
   const val = (x) => esc(Array.isArray(x) ? x.join(', ') : typeof x === 'object' && x ? Object.entries(x).map(([a, b]) => `${a}: ${b}`).join('; ') : x);
   app.innerHTML = `<div class="note info">${badge(v._queued ? 'QUEUED' : v.status)} ${v.status === 'VERIFIED' ? 'Verified by your mentor.' : 'With your mentor for review.'}</div>
-    <div class="card" style="margin-top:12px"><table>${Object.entries(v.observations || {}).filter(([k]) => k !== 'std' && k !== 'v').map(([k, x]) => `<tr><td class="small muted">${esc(k)}</td><td>${esc(lab(k))}</td><td>${val(x)}</td></tr>`).join('')}</table></div>`;
+    <div class="card" style="margin-top:12px"><table>${Object.entries(v.observations || {}).filter(([k]) => k !== 'std' && k !== 'v' && k !== '_proof').map(([k, x]) => `<tr><td class="small muted">${esc(k)}</td><td>${esc(lab(k))}</td><td>${val(x)}</td></tr>`).join('')}</table></div>`;
 }
 
 function viewSync() {
   head('Sync and settings', online() ? 'Online' : 'Offline', '#/');
   app.innerHTML = `<div class="card"><strong>${S.queue.length ? `${S.queue.length} entr${S.queue.length > 1 ? 'ies' : 'y'} waiting to upload` : 'Everything is uploaded'}</strong>
       <p class="small muted">Entries made without network are kept encrypted on this phone and upload automatically when you are back online. They are removed from the upload list after a successful upload.</p>
-      <div class="list">${S.queue.map((o, i) => `<div class="item"><div class="grow small"><strong>${esc(o.table.replace(/_/g, ' '))}</strong> · ${fmtDate(o.at)}${o.failed ? `<div style="color:var(--bad)">${esc(o.failed)}</div>` : ''}</div>${o.failed ? `<button class="btn ghost" data-drop="${i}">Discard</button>` : badge('QUEUED')}</div>`).join('')}</div>
+      <div class="list">${S.queue.map((o, i) => `<div class="item"><div class="grow small"><strong>${esc(o.action === 'upload' ? 'proof photo' : o.table.replace(/_/g, ' '))}</strong> · ${fmtDate(o.at)}${o.failed ? `<div style="color:var(--bad)">${esc(o.failed)}</div>` : ''}</div>${o.failed ? `<button class="btn ghost" data-drop="${i}">Discard</button>` : badge('QUEUED')}</div>`).join('')}</div>
       <button class="btn full" id="now" style="margin-top:12px" ${online() ? '' : 'disabled'}>Upload and refresh now</button></div>
     <div class="card" style="margin-top:12px"><strong>${esc(S.me.full_name)}</strong><div class="small muted">Roll ${esc(S.student?.roll_number || '')} · App v${esc(APP_VERSION)}</div>
       <p class="small muted">Install: in Chrome, menu &gt; "Add to Home screen".</p>
