@@ -2,9 +2,9 @@
 // Plain JavaScript, no build step. Talks to Supabase; the database access rules (RLS)
 // decide what each signed-in person can see. This file never bypasses them.
 import { createClient } from './vendor/supabase-2.119.2.js';
-import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.13';
-import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.13';
-import { FOODS } from './nutrition.js?v=0.4.13';
+import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.14';
+import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.14';
+import { FOODS } from './nutrition.js?v=0.4.14';
 
 // an invitation or password-reset email lands here with #access_token...&type=invite|recovery
 const FROM_EMAIL_LINK = /type=(invite|recovery)/.test(location.hash);
@@ -310,6 +310,7 @@ async function viewFamily(id) {
 function proofCard(pf) {
   if (!pf) return '<div class="sec card"><h2>Proof of visit</h2><p class="muted small">No photo attached (records made before 28 Nov 2026 have none).</p></div>';
   const map = pf.lat ? `<a href="https://www.openstreetmap.org/?mlat=${pf.lat}&mlon=${pf.lng}#map=17/${pf.lat}/${pf.lng}" target="_blank" rel="noopener">${pf.lat}, ${pf.lng}</a> (±${esc(pf.acc ?? '?')} m)` : 'not recorded';
+  if (!pf.path) return `<div class="sec card"><h2>Proof of visit</h2><p class="small muted">No photo attached (demonstration record).</p><p class="small">Location: ${map} · ${fmtDate(pf.at)}</p></div>`;
   const id = 'pf' + Math.random().toString(36).slice(2, 8);
   setTimeout(async () => { const el = document.getElementById(id); if (!el || !pf.path) return;
     const { data, error } = await sb.storage.from('visit-proofs').createSignedUrl(pf.path, 3600);
@@ -414,7 +415,7 @@ async function reportData() {
 async function downloadReport(kind, studentId) {
   toast('Preparing the Word report…');
   try {
-    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.13')]);
+    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.14')]);
     let D = await reportData();
     const st = D.students.find((s) => s.student_id === studentId);
     let extra = {};
@@ -451,7 +452,7 @@ app.addEventListener('click', (e) => {
 async function viewOverview() {
   setTab('overview');
   if (!isHOD() && !S.roles.includes('AUDITOR')) { location.hash = '#/'; return; }
-  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.13')]);
+  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.14')]);
   const A = R.computeAnalytics(D);
   const tbl = (rows) => `<div class="tbox"><table><thead><tr><th>Indicator</th><th>Number (%)</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td><strong>${esc(v)}</strong></td></tr>`).join('')}</tbody></table></div>`;
   app.innerHTML = `<div class="row"><div style="flex:1"><h1>College overview</h1><p class="muted">${esc(D.institution.institution_name || '')} · ${esc(D.institution.district || '-')}, ${esc(D.institution.state || '-')} · as of ${fmtDate(new Date())}</p></div>
@@ -481,7 +482,7 @@ const svgToPng = (svg, scale = 2) => new Promise((res, rej) => {
 const saveBlob = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); };
 const chartMeta = (D) => ({ place: `${D.institution.institution_name || ''}, ${D.institution.district || '-'}, ${D.institution.state || '-'}.`, source: `Source: FAP Digital Health, data as of ${fmtDate(new Date())}.` });
 async function analyticsPack() {
-  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.13')]);
+  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.14')]);
   const today = localISO(), f = S.af || {};
   const D = C.filterData(D0, f, today), fl = C.filterLabel(D0, f);
   const meta = chartMeta(D0); if (fl) meta.place = meta.place + ' ' + fl;
