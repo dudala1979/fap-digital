@@ -2,10 +2,12 @@
 // Plain JavaScript, no build step. Talks to Supabase; the database access rules (RLS)
 // decide what each signed-in person can see. This file never bypasses them.
 import { createClient } from './vendor/supabase-2.119.2.js';
-import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.9';
-import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.9';
-import { FOODS } from './nutrition.js?v=0.4.9';
+import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.10';
+import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.10';
+import { FOODS } from './nutrition.js?v=0.4.10';
 
+// an invitation or password-reset email lands here with #access_token...&type=invite|recovery
+const FROM_EMAIL_LINK = /type=(invite|recovery)/.test(location.hash);
 const sb = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, storageKey: 'fap-portal-auth' }
 });
@@ -389,7 +391,7 @@ async function reportData() {
 async function downloadReport(kind, studentId) {
   toast('Preparing the Word report…');
   try {
-    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.9')]);
+    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.10')]);
     let D = await reportData();
     const st = D.students.find((s) => s.student_id === studentId);
     let extra = {};
@@ -426,7 +428,7 @@ app.addEventListener('click', (e) => {
 async function viewOverview() {
   setTab('overview');
   if (!isHOD() && !S.roles.includes('AUDITOR')) { location.hash = '#/'; return; }
-  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.9')]);
+  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.10')]);
   const A = R.computeAnalytics(D);
   const tbl = (rows) => `<div class="tbox"><table><thead><tr><th>Indicator</th><th>Number (%)</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td><strong>${esc(v)}</strong></td></tr>`).join('')}</tbody></table></div>`;
   app.innerHTML = `<div class="row"><div style="flex:1"><h1>College overview</h1><p class="muted">${esc(D.institution.institution_name || '')} · ${esc(D.institution.district || '-')}, ${esc(D.institution.state || '-')} · as of ${fmtDate(new Date())}</p></div>
@@ -456,7 +458,7 @@ const svgToPng = (svg, scale = 2) => new Promise((res, rej) => {
 const saveBlob = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); };
 const chartMeta = (D) => ({ place: `${D.institution.institution_name || ''}, ${D.institution.district || '-'}, ${D.institution.state || '-'}.`, source: `Source: FAP Digital Health, data as of ${fmtDate(new Date())}.` });
 async function analyticsPack() {
-  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.9')]);
+  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.10')]);
   const today = localISO(), f = S.af || {};
   const D = C.filterData(D0, f, today), fl = C.filterLabel(D0, f);
   const meta = chartMeta(D0); if (fl) meta.place = meta.place + ' ' + fl;
@@ -588,7 +590,7 @@ function viewPassword(forced) {
   setTab('password');
   app.innerHTML = `<div class="login card">
     <h1>${forced ? 'Set your own password' : 'Change my password'}</h1>
-    ${forced ? '<p class="muted">You signed in with a temporary password. Choose your own before continuing.</p>' : ''}
+    ${forced ? '<p class="muted">Choose your own password before continuing. You will use it with your email to sign in.</p>' : ''}
     <form id="pf">
       <label class="lbl" for="p1">New password (at least 8 characters)</label><input id="p1" type="password" minlength="8" autocomplete="new-password" required>
       <label class="lbl" for="p2">Type it again</label><input id="p2" type="password" minlength="8" autocomplete="new-password" required>
@@ -604,7 +606,12 @@ function viewPassword(forced) {
       const { error } = await sb.auth.updateUser({ password: $('#p1').value });
       if (error) throw error;
       await q(sb.rpc('fap_password_changed'));
-      S.me.must_change_password = false; toast('Password saved');
+      S.me.must_change_password = false; S.pwDone = true; toast('Password saved');
+      if (!S.roles.some((r) => ['FACULTY', 'HOD', 'AUDITOR', 'INSTITUTION_ADMIN'].includes(r))) {
+        await sb.auth.signOut();
+        app.innerHTML = `<div class="login card"><h1>Password saved</h1><p>You are a student. Open the student app on your phone and sign in with your email and this password.</p><a class="btn" href="../student/${location.search}">Open the student app</a></div>`;
+        return;
+      }
       location.hash = canManage() && !S.roles.includes('FACULTY') && !isHOD() ? '#/manage' : '#/'; start();
     } catch (err) { fail(err); $('#pb').disabled = false; }
   };
@@ -840,6 +847,7 @@ async function start() {
     const ok = await loadMe();
     if (!ok) return viewLogin();
     if (ok === 'unlinked') { await sb.auth.signOut(); return viewLogin('Your login is not linked to a college account yet. Please ask your college admin.'); }
+    if (S.me.must_change_password || (FROM_EMAIL_LINK && !S.pwDone)) return viewPassword(true);
     if (!S.roles.some((r) => ['FACULTY', 'HOD', 'AUDITOR', 'INSTITUTION_ADMIN'].includes(r))) { await sb.auth.signOut(); return viewLogin('This portal is for faculty, HOD, auditors and the college admin. Students use the mobile app.'); }
     $('#topbar').hidden = false;
     $('#who').textContent = `${S.me.full_name} · ${S.roles.join(', ')}`;
