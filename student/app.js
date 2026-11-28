@@ -80,6 +80,9 @@ function setChip() {
   $('#chipText').textContent = !online() ? `Offline${n ? ' · ' + n + ' waiting' : ''}` : n ? `${n} waiting` : 'Online';
 }
 window.addEventListener('online', () => { setChip(); syncQueue(); });
+// retry quietly: phones often report "online" before data actually flows
+setInterval(() => { if (S.queue.length && online()) syncQueue(); }, 180000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.queue.length && online()) syncQueue(); });
 window.addEventListener('offline', setChip);
 
 async function loadAll(force) {
@@ -88,7 +91,7 @@ async function loadAll(force) {
       const [families, members, consents, baselines, visits, reviews, referrals, forms, evidence, profile] = await Promise.all([
         qAll(sb.from('families').select('family_id, institution_id, family_code, village_or_locality, phc_name, consent_status, enrolment_status, slot_no'), 'family_id'),
         qAll(sb.from('family_members').select('family_member_id, family_id, member_code, full_name, sex, date_of_birth, relationship_to_head, is_active'), 'family_member_id'),
-        qAll(sb.from('consent_records').select('consent_id, family_id, consent_status, consent_date, recorded_at, notice_language, guardian_consent_minors, research_opt_in, consenter_name').order('recorded_at', { ascending: false }), 'consent_id'),
+        qAll(sb.from('consent_records').select('consent_id, family_id, consent_version, consent_status, consent_date, recorded_at, notice_language, guardian_consent_minors, research_opt_in, consenter_name, photo_location_consent').order('recorded_at', { ascending: false }), 'consent_id'),
         qAll(sb.from('baseline_assessments').select('baseline_id, family_id, assessment_date, status, assessment_data, form_version_id'), 'baseline_id'),
         qAll(sb.from('visit_records').select('visit_id, family_id, visit_date, visit_number, status, observations, persons_contacted, health_education, referral_needed, next_followup_date'), 'visit_id'),
         qAll(sb.from('faculty_reviews').select('review_id, family_id, visit_id, baseline_id, decision, feedback, reviewed_at').order('reviewed_at', { ascending: false }), 'review_id'),
@@ -181,7 +184,7 @@ async function syncQueue() {
       try { await perform(op); S.queue.shift(); await putEnc('queue', S.queue); }
       catch (e) { if (isNet(e)) break; op.failed = friendly(e); await putEnc('queue', S.queue); break; }
     }
-    if (!S.queue.length) { await loadAll(true); toast('All entries uploaded'); }
+    if (!S.queue.length) { try { localStorage.setItem('fap_last_upload', new Date().toISOString()); } catch { /* private mode */ } await loadAll(true); toast('All entries uploaded'); }
   } finally { S.syncing = false; setChip(); if (location.hash.startsWith('#/sync') || !location.hash || location.hash === '#/') route(); }
 }
 
@@ -445,24 +448,40 @@ async function compressTo50KB(file) {
   return url;
 }
 const kbOf = (url) => Math.round(((url.length - 23) * 0.75) / 1024);
-function proofHTML(old) {
+// proof photo + location only when the household consent (v1.1+) covers it
+const photoConsent = (famId) => latestConsent(famId)?.photo_location_consent;
+function proofHTML(old, famId) {
+  const pc = photoConsent(famId);
+  if (pc !== true) return `<div class="q" id="proofBox" style="border:2px dashed #9fb3c8;border-radius:12px;padding:12px;margin-top:14px">
+    <span class="lab">Proof of visit</span>
+    <div class="small">${pc === false ? 'The family did not agree to photos or location. No photo is taken; the visit still counts.'
+      : `This family's consent (v1.0) does not cover photos or location. <a href="#/consent/${famId}">Update the household consent</a> with the family at this visit; until then no photo is taken.`}</div></div>`;
   return `<div class="q" id="proofBox" style="border:2px dashed #9fb3c8;border-radius:12px;padding:12px;margin-top:14px">
     <span class="lab">Proof of visit <span class="req">*</span></span>
-    <div class="small muted">One photo of the visit (house entrance or the activity). Avoid faces unless the family agrees. It is reduced to 50 KB automatically.</div>
-    <input type="file" id="pfPhoto" accept="image/*" capture="environment" style="margin-top:8px">
+    <div class="small muted">One photo of the visit (house entrance or the activity). Avoid faces and ID cards. It is reduced to 50 KB automatically.</div>
+    <div id="pfWrap"><input type="file" id="pfPhoto" accept="image/*" capture="environment" style="margin-top:8px">
     <div id="pfPrev" style="margin-top:8px">${old?.path ? '<span class="small">Photo already attached. Take a new one only to replace it.</span>' : ''}</div>
     <div class="small" id="pfGeo" style="margin-top:6px">Location: ${old?.lat ? `${old.lat}, ${old.lng} (saved)` : 'getting location…'}</div>
-    <label class="chk" style="margin-top:6px"><input type="checkbox" id="pfOk" ${old?.path ? 'checked' : ''}><span>The family agreed to this photo and location being recorded for FAP.</span></label></div>`;
+    <label class="chk" style="margin-top:6px"><input type="checkbox" id="pfOk" ${old?.path ? 'checked' : ''}><span>The family agreed again today to this photo and location.</span></label></div>
+    <label class="chk" style="border:none"><input type="checkbox" id="pfNo" ${old?.declined ? 'checked' : ''}><span>The family does not want a photo today (no photo, no location).</span></label></div>`;
 }
-function wireProof(old) {
+function wireProof(old, famId) {
+  if (photoConsent(famId) !== true) {
+    const why = photoConsent(famId) === false ? 'no_consent' : 'consent_v1_0';
+    return async () => ({ declined: true, reason: why, at: new Date().toISOString() });
+  }
   const st = { url: null, lat: old?.lat ?? null, lng: old?.lng ?? null, acc: old?.acc ?? null };
   const geo = () => {
     if (!navigator.geolocation) { $('#pfGeo').textContent = 'Location: not available on this phone'; return; }
-    navigator.geolocation.getCurrentPosition((p) => { st.lat = +p.coords.latitude.toFixed(5); st.lng = +p.coords.longitude.toFixed(5); st.acc = Math.round(p.coords.accuracy); $('#pfGeo').innerHTML = `Location: <strong>${st.lat}, ${st.lng}</strong> (±${st.acc} m)`; },
+    navigator.geolocation.getCurrentPosition((p) => { st.lat = +p.coords.latitude.toFixed(4); st.lng = +p.coords.longitude.toFixed(4); st.acc = Math.round(p.coords.accuracy); $('#pfGeo').innerHTML = `Location: <strong>${st.lat}, ${st.lng}</strong> (±${st.acc} m)`; },
       () => { $('#pfGeo').innerHTML = 'Location: not available (allow location for this app, then tap <a href="#" id="pfRetry">try again</a>)'; const r = $('#pfRetry'); if (r) r.onclick = (e) => { e.preventDefault(); geo(); }; },
       { enableHighAccuracy: true, timeout: 20000, maximumAge: 60000 });
   };
-  if (!old?.lat) geo();
+  const no = $('#pfNo');
+  const sync = () => { $('#pfWrap').hidden = no.checked; };
+  no.onchange = () => { sync(); if (!no.checked && !st.lat) geo(); };
+  sync();
+  if (!old?.lat && !no.checked) geo();
   $('#pfPhoto').onchange = async (e) => {
     const f = e.target.files[0]; if (!f) return;
     $('#pfPrev').textContent = 'Reducing photo…';
@@ -470,12 +489,13 @@ function wireProof(old) {
     catch { $('#pfPrev').textContent = 'Could not read the photo. Try again.'; }
   };
   // returns the _proof object for the record, after queuing the photo upload; null if blocked
-  return async (famId, recKey, required) => {
+  return async (famId2, recKey, required) => {
+    if (no.checked) return { declined: true, reason: 'refused_today', at: new Date().toISOString() };
     const has = st.url || old?.path;
-    if (required && !has) { toast('Add one photo as proof of visit'); $('#proofBox').scrollIntoView({ block: 'center' }); return null; }
+    if (required && !has) { toast('Add one photo as proof of visit, or tick that the family does not want a photo today'); $('#proofBox').scrollIntoView({ block: 'center' }); return null; }
     if (has && !$('#pfOk').checked) { toast('Tick the family agreement box for the photo'); $('#proofBox').scrollIntoView({ block: 'center' }); return null; }
     let path = old?.path || null;
-    if (st.url) { path = `${S.me.institution_id}/${famId}/${recKey}.jpg`; await write({ table: '__upload', action: 'upload', path, data: st.url }); }
+    if (st.url) { path = `${S.me.institution_id}/${famId2}/${recKey}.jpg`; await write({ table: '__upload', action: 'upload', path, data: st.url }); }
     return has ? { path, lat: st.lat, lng: st.lng, acc: st.acc, at: new Date().toISOString(), kb: st.url ? kbOf(st.url) : old?.kb ?? null } : undefined;
   };
 }
@@ -499,6 +519,18 @@ function viewAddFamily() {
     } catch (err) { toast(friendly(err)); $('#afb').disabled = false; }
   };
 }
+// daily-sync reminder: entries kept only on the phone are lost if the phone is lost
+function syncBanner() {
+  const n = S.queue.length;
+  if (!n) return '';
+  const oldest = Math.min(...S.queue.map((o) => Date.parse(o.at) || Date.now()));
+  const h = Math.floor((Date.now() - oldest) / 36e5);
+  const age = h < 1 ? 'less than an hour' : h < 48 ? `${h} hour${h > 1 ? 's' : ''}` : `${Math.floor(h / 24)} days`;
+  const late = h >= 24;
+  return `<div class="note" style="margin-bottom:12px;${late ? 'background:#fdecea;border-color:#b3261e' : ''}"><strong>${n} entr${n > 1 ? 'ies are' : 'y is'} saved only on this phone</strong> (oldest: ${age}).
+    ${late ? 'Upload today. ' : ''}If the phone is lost, reset or the app is cleared, these entries are lost. Connect to mobile data or Wi-Fi once a day.
+    <div style="margin-top:8px"><a class="btn ${late ? '' : 'ghost'}" href="#/sync">Upload now</a></div></div>`;
+}
 function viewHome() {
   head('My families', `${S.me.full_name} · ${S.student?.current_phase || ''}`);
   const returned = S.data.baselines.filter((b) => b.status === 'RETURNED').length + S.data.visits.filter((v) => v.status === 'RETURNED').length;
@@ -509,6 +541,7 @@ function viewHome() {
     return `<a class="item" href="#/family/${f.family_id}"><div class="grow"><strong>${esc(f.family_code)}</strong> <span class="small muted">${esc(f.village_or_locality || '')}</span><div class="small">${esc(next)}</div></div>${badge(st)}</a>`;
   }).join('');
   app.innerHTML = `${returned ? `<div class="note" style="margin-bottom:12px"><strong>${returned} record${returned > 1 ? 's' : ''} returned by your mentor.</strong> Open the family to see the note.</div>` : ''}
+    ${syncBanner()}
     ${profileCard()}
     <div class="list">${rows || '<div class="card muted">No families yet. Add the families you have adopted (up to 5).</div>'}</div>
     ${addFamilyBlock()}
@@ -578,7 +611,8 @@ function viewFamily(id) {
   app.innerHTML = `
     ${notes.map((r) => `<div class="note ${r.decision === 'COMMENTED' ? 'info' : ''}" style="margin-bottom:10px"><strong>${r.decision === 'RETURNED' ? 'Returned by mentor' : 'Mentor comment'}:</strong> ${esc(r.feedback)} <div class="small">${fmtDate(r.reviewed_at)}</div></div>`).join('')}
     <div class="card"><div class="row" style="display:flex;gap:8px;align-items:center"><strong style="flex:1">Household consent</strong>${badge(f.consent_status)}</div>
-      ${c ? `<div class="small muted">Recorded ${fmtDate(c.consent_date)} · ${esc(c.notice_language || '')} · children: ${c.guardian_consent_minors ? 'guardian consent given' : 'no guardian consent'}</div>` : ''}
+      ${c ? `<div class="small muted">Recorded ${fmtDate(c.consent_date)} · ${esc(c.consent_version || '')} · ${esc(c.notice_language || '')} · children: ${c.guardian_consent_minors ? 'guardian consent given' : 'no guardian consent'} · photo and location: ${c.photo_location_consent === true ? 'agreed' : c.photo_location_consent === false ? 'not agreed' : 'not asked (v1.0)'}</div>` : ''}
+      ${granted && c && c.photo_location_consent == null ? `<div class="note" style="margin-top:8px">This consent is v1.0 and does not cover the proof photo and location. Read the new notice and tap <strong>Update consent</strong> at your next visit.</div>` : ''}
       <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
         ${!granted ? `<a class="btn full" href="#/consent/${id}">Record consent</a>` : `<a class="btn ghost" href="#/consent/${id}">Update consent</a><button class="btn ghost" id="withdraw">Family withdraws</button>`}
       </div></div>
@@ -598,7 +632,7 @@ function viewFamily(id) {
   if (w) w.onclick = async () => {
     const reason = prompt('The family wants to stop. Reason (optional):'); if (reason === null) return;
     try {
-      const r = await write({ table: 'consent_records', action: 'insert', values: { consent_id: uuid(), institution_id: f.institution_id, family_id: id, consent_version: 'v1.0', consent_status: 'WITHDRAWN', consent_method: 'DIGITAL', recorded_by: S.me.user_id, withdrawal_reason: reason || null, consent_date: new Date().toISOString(), recorded_at: new Date().toISOString() } });
+      const r = await write({ table: 'consent_records', action: 'insert', values: { consent_id: uuid(), institution_id: f.institution_id, family_id: id, consent_version: 'v1.1', consent_status: 'WITHDRAWN', consent_method: 'DIGITAL', recorded_by: S.me.user_id, withdrawal_reason: reason || null, consent_date: new Date().toISOString(), recorded_at: new Date().toISOString() } });
       toast(r === 'queued' ? 'Saved on phone; will upload' : 'Withdrawal recorded. No more data will be collected.'); route();
     } catch (e) { toast(friendly(e)); }
   };
@@ -607,10 +641,12 @@ function viewFamily(id) {
 function viewConsent(id) {
   const f = famOf(id); head('Household consent', f.family_code, `#/family/${id}`);
   app.innerHTML = `
-    <div class="card"><strong>Read this notice to the family (v1.0)</strong>
+    <div class="card"><strong>Read this notice to the family (v1.1)</strong>
       <ul class="small" style="padding-left:18px;margin:8px 0 0">
         <li>What we collect: household details, health history, blood pressure, height and weight of family members.</li>
         <li>Why: MBBS family adoption training and health advice for your family.</li>
+        <li>Proof of visit: at each visit the student takes one photo (house entrance or the activity) and the phone records the approximate location of the house (about 10 metres). Faces and ID cards are avoided. You may refuse; the visit still counts.</li>
+        <li>Photos are deleted automatically 1 year after the visit record is checked by the mentor. The location and date stay in the record.</li>
         <li>Who sees it: this student, the faculty mentor and the HOD of Community Medicine of this college only.</li>
         <li>You can ask to see, correct or delete your information, or stop at any time.</li>
         <li>Questions or complaints: Department of Community Medicine of the college.</li>
@@ -623,6 +659,7 @@ function viewConsent(id) {
       <div class="card" style="margin-top:14px;padding:4px 14px">
         <label class="chk"><input type="checkbox" id="ag" required><span>The family agrees to take part and to the use explained above.</span></label>
         <label class="chk"><input type="checkbox" id="gd"><span>As parent or guardian, they also agree for children under 18 in the house.</span></label>
+        <label class="chk"><input type="checkbox" id="ph"><span>They agree to one proof photo and the house location being recorded at each visit.</span></label>
         <label class="chk" style="border:none"><input type="checkbox" id="rs"><span>Optional: anonymous data may be used for approved research.</span></label>
       </div>
       <div class="bar"><button type="button" class="btn ghost" id="dec">Family declines</button><button class="btn" id="ok">Save consent</button></div>
@@ -631,7 +668,7 @@ function viewConsent(id) {
     if (status === 'GRANTED' && (!$('#nm').value.trim() || !$('#ag').checked)) return toast('Enter the name and tick agreement');
     try {
       const now = new Date().toISOString();
-      const r = await write({ table: 'consent_records', action: 'insert', values: { consent_id: uuid(), institution_id: f.institution_id, family_id: id, consent_version: 'v1.0', consent_status: status, consent_method: 'DIGITAL', recorded_by: S.me.user_id, consenter_name: $('#nm').value.trim() || null, consenter_relationship: $('#rel').value, notice_language: $('#lang').value, guardian_consent_minors: $('#gd').checked, research_opt_in: $('#rs').checked, consent_date: now, recorded_at: now } });
+      const r = await write({ table: 'consent_records', action: 'insert', values: { consent_id: uuid(), institution_id: f.institution_id, family_id: id, consent_version: 'v1.1', consent_status: status, consent_method: 'DIGITAL', photo_location_consent: status === 'GRANTED' ? $('#ph').checked : null, recorded_by: S.me.user_id, consenter_name: $('#nm').value.trim() || null, consenter_relationship: $('#rel').value, notice_language: $('#lang').value, guardian_consent_minors: $('#gd').checked, research_opt_in: $('#rs').checked, consent_date: now, recorded_at: now } });
       toast(r === 'queued' ? 'Saved on phone; will upload when online' : 'Consent saved'); location.hash = `#/family/${id}`;
     } catch (e) { toast(friendly(e)); }
   };
@@ -697,7 +734,7 @@ function viewBaseline(id) {
     S.forms.modules.forEach((mod) => { html += mod.questions.map((q) => field({ ...q, label: q.label }, `m:${m.member_code}`, ans[q.code], 'mod')).join(''); });
   });
   html += `<div class="sec-h">End of visit</div>` + wr.map((q) => field(q, 'wrap_up', data.wrap_up?.[q.code])).join('');
-  html += proofHTML(b?.assessment_data?._proof);
+  html += proofHTML(b?.assessment_data?._proof, id);
   html += `<div class="bar"><button class="btn ghost" id="draft">Save draft</button><button class="btn" id="submit">Submit to mentor</button></div>`;
   app.innerHTML = `<form id="bf" novalidate>${html}</form>`;
   const root = $('#bf');
@@ -718,7 +755,7 @@ function viewBaseline(id) {
     }
     return out;
   };
-  const proof = wireProof(b?.assessment_data?._proof);
+  const proof = wireProof(b?.assessment_data?._proof, id);
   const save = async (status) => {
     if (status === 'SUBMITTED' && !validate(root)) return;
     const d = collect();
@@ -765,13 +802,13 @@ function viewVisit(id, existing) {
     html += field(qq, 'visit', prev[q.code]);
   });
   html += `<div class="q" data-scope="ref" data-q="R1" data-show="" data-req="0" id="refbox" hidden><span class="lab">Referral: reason and place</span><input data-nm="ref|R1" placeholder="Reason"><input data-nm="ref|R2" placeholder="Referred to (facility)" style="margin-top:8px"></div>`;
-  html += proofHTML(existing?.observations?._proof);
+  html += proofHTML(existing?.observations?._proof, id);
   html += `<div class="bar"><a class="btn ghost" href="#/family/${id}">Cancel</a><button class="btn" id="submit">Submit to mentor</button></div>`;
   app.innerHTML = `<form id="vf" novalidate>${html}</form>`;
   const root = $('#vf');
   const ctxOf = (sc, ans) => ({ age: null, months: null, sex: null, ans });
   wireForm(root, ctxOf);
-  const proof = wireProof(existing?.observations?._proof);
+  const proof = wireProof(existing?.observations?._proof, id);
   root.addEventListener('change', () => { $('#refbox').hidden = readScope(root, 'visit')[fr.ref_flag] !== 'Yes'; });
   $('#submit').onclick = async (e) => {
     e.preventDefault(); if (!validate(root)) return;
@@ -814,6 +851,7 @@ function viewSync() {
   app.innerHTML = `<div class="card"><strong>${S.queue.length ? `${S.queue.length} entr${S.queue.length > 1 ? 'ies' : 'y'} waiting to upload` : 'Everything is uploaded'}</strong>
       <p class="small muted">Entries made without network are kept encrypted on this phone and upload automatically when you are back online. They are removed from the upload list after a successful upload.</p>
       <div class="list">${S.queue.map((o, i) => `<div class="item"><div class="grow small"><strong>${esc(o.action === 'upload' ? 'proof photo' : o.table.replace(/_/g, ' '))}</strong> · ${fmtDate(o.at)}${o.failed ? `<div style="color:var(--bad)">${esc(o.failed)}</div>` : ''}</div>${o.failed ? `<button class="btn ghost" data-drop="${i}">Discard</button>` : badge('QUEUED')}</div>`).join('')}</div>
+      <p class="small muted">Last full upload from this phone: ${(() => { try { const t = localStorage.getItem('fap_last_upload'); return t ? fmtDate(t) + ' ' + new Date(t).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : 'not recorded yet'; } catch { return 'not recorded'; } })()}. Upload at least once a day.</p>
       <button class="btn full" id="now" style="margin-top:12px" ${online() ? '' : 'disabled'}>Upload and refresh now</button></div>
     <div class="card" style="margin-top:12px"><strong>${esc(S.me.full_name)}</strong><div class="small muted">Roll ${esc(S.student?.roll_number || '')} · App v${esc(APP_VERSION)}</div>
       <p class="small muted">Install: in Chrome, menu &gt; "Add to Home screen".</p>

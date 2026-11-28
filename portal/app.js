@@ -2,9 +2,9 @@
 // Plain JavaScript, no build step. Talks to Supabase; the database access rules (RLS)
 // decide what each signed-in person can see. This file never bypasses them.
 import { createClient } from './vendor/supabase-2.119.2.js';
-import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.14';
-import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.14';
-import { FOODS } from './nutrition.js?v=0.4.14';
+import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, APP_VERSION } from './config.js?v=0.4.15';
+import { CREDIT, brand, brandBlock, setBrand } from './brand.js?v=0.4.15';
+import { FOODS } from './nutrition.js?v=0.4.15';
 
 // an invitation or password-reset email lands here with #access_token...&type=invite|recovery
 const FROM_EMAIL_LINK = /type=(invite|recovery)/.test(location.hash);
@@ -310,6 +310,7 @@ async function viewFamily(id) {
 function proofCard(pf) {
   if (!pf) return '<div class="sec card"><h2>Proof of visit</h2><p class="muted small">No photo attached (records made before 28 Nov 2026 have none).</p></div>';
   const map = pf.lat ? `<a href="https://www.openstreetmap.org/?mlat=${pf.lat}&mlon=${pf.lng}#map=17/${pf.lat}/${pf.lng}" target="_blank" rel="noopener">${pf.lat}, ${pf.lng}</a> (±${esc(pf.acc ?? '?')} m)` : 'not recorded';
+  if (pf.declined) return `<div class="sec card"><h2>Proof of visit</h2><p class="small">No photo or location: ${pf.reason === 'refused_today' ? 'the family did not want a photo at this visit' : pf.reason === 'no_consent' ? 'the family did not agree to photos in the household consent' : 'household consent is v1.0, which does not cover photos (student should update consent)'}. ${fmtDate(pf.at)}</p></div>`;
   if (!pf.path) return `<div class="sec card"><h2>Proof of visit</h2><p class="small muted">No photo attached (demonstration record).</p><p class="small">Location: ${map} · ${fmtDate(pf.at)}</p></div>`;
   const id = 'pf' + Math.random().toString(36).slice(2, 8);
   setTimeout(async () => { const el = document.getElementById(id); if (!el || !pf.path) return;
@@ -415,7 +416,7 @@ async function reportData() {
 async function downloadReport(kind, studentId) {
   toast('Preparing the Word report…');
   try {
-    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.14')]);
+    const [docx, R] = await Promise.all([import('https://cdn.jsdelivr.net/npm/docx@9.16.0/+esm'), import('./report.js?v=0.4.15')]);
     let D = await reportData();
     const st = D.students.find((s) => s.student_id === studentId);
     let extra = {};
@@ -452,7 +453,7 @@ app.addEventListener('click', (e) => {
 async function viewOverview() {
   setTab('overview');
   if (!isHOD() && !S.roles.includes('AUDITOR')) { location.hash = '#/'; return; }
-  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.14')]);
+  const [D, R] = await Promise.all([reportData(), import('./report.js?v=0.4.15')]);
   const A = R.computeAnalytics(D);
   const tbl = (rows) => `<div class="tbox"><table><thead><tr><th>Indicator</th><th>Number (%)</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td><strong>${esc(v)}</strong></td></tr>`).join('')}</tbody></table></div>`;
   app.innerHTML = `<div class="row"><div style="flex:1"><h1>College overview</h1><p class="muted">${esc(D.institution.institution_name || '')} · ${esc(D.institution.district || '-')}, ${esc(D.institution.state || '-')} · as of ${fmtDate(new Date())}</p></div>
@@ -482,7 +483,7 @@ const svgToPng = (svg, scale = 2) => new Promise((res, rej) => {
 const saveBlob = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); };
 const chartMeta = (D) => ({ place: `${D.institution.institution_name || ''}, ${D.institution.district || '-'}, ${D.institution.state || '-'}.`, source: `Source: FAP Digital Health, data as of ${fmtDate(new Date())}.` });
 async function analyticsPack() {
-  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.14')]);
+  const [D0, C] = await Promise.all([reportData(), import('./charts.js?v=0.4.15')]);
   const today = localISO(), f = S.af || {};
   const D = C.filterData(D0, f, today), fl = C.filterLabel(D0, f);
   const meta = chartMeta(D0); if (fl) meta.place = meta.place + ' ' + fl;
@@ -664,6 +665,89 @@ function showSecret(title, email, pw) {
   d.showModal();
 }
 
+const canPromote = () => isHOD() || isIA();
+function parseCSV(text) {
+  const rows = []; let row = [], cur = '', inQ = false;
+  text = text.replace(/^\uFEFF/, '');
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQ) { if (ch === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else inQ = false; } else cur += ch; }
+    else if (ch === '"') inQ = true;
+    else if (ch === ',') { row.push(cur); cur = ''; }
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cur); rows.push(row); row = []; cur = ''; }
+    else cur += ch;
+  }
+  if (cur || row.length) { row.push(cur); rows.push(row); }
+  return rows.filter((r) => r.some((x) => x.trim()));
+}
+const csvCell = (v) => /[",\n]/.test(String(v ?? '')) ? `"${String(v).replace(/"/g, '""')}"` : String(v ?? '');
+function downloadText(name, text) {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['\uFEFF' + text], { type: 'text/csv;charset=utf-8' })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+function wireBulk({ users, faculty, students, batches }) {
+  const out = $('#bkOut'); if (!out) return;
+  $('#tpl').onclick = (e) => { e.preventDefault(); downloadText('FAP_student_import_template.csv', 'full_name,email,roll_number,mentor_email\n'); };
+  const facByEmail = Object.fromEntries(faculty.map((f) => [String(users.find((u) => u.user_id === f.user_id)?.email || '').toLowerCase(), f.faculty_id]).filter(([k]) => k));
+  const known = new Set(users.map((u) => String(u.email || '').toLowerCase()));
+  $('#bkf').onchange = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const batch = $('#bkb').value; if (!batch) return toast('Create a batch first');
+    const rolls = new Set(students.filter((x) => x.batch_id === batch).map((x) => String(x.roll_number).trim().toLowerCase()));
+    const all = parseCSV(await file.text());
+    if (!all.length) return toast('The file is empty');
+    const head = all[0].map((h) => h.trim().toLowerCase().replace(/\s+/g, '_'));
+    const ix = (k) => head.indexOf(k);
+    if (ix('full_name') < 0 || ix('email') < 0 || ix('roll_number') < 0) { out.innerHTML = '<div class="note">The first row must have the column names full_name, email, roll_number (and optionally mentor_email). Use the template.</div>'; return; }
+    const seenE = new Set(), seenR = new Set();
+    const rows = all.slice(1).map((r, i) => {
+      const g = (k) => (ix(k) >= 0 ? String(r[ix(k)] || '').trim() : '');
+      const x = { line: i + 2, full_name: g('full_name'), email: g('email').toLowerCase(), roll_number: g('roll_number'), mentor_email: g('mentor_email').toLowerCase(), problem: '' };
+      if (!x.full_name) x.problem = 'name missing';
+      else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x.email)) x.problem = 'email not valid';
+      else if (!x.roll_number) x.problem = 'roll number missing';
+      else if (known.has(x.email)) x.problem = 'email already has a login';
+      else if (seenE.has(x.email)) x.problem = 'email repeated in file';
+      else if (rolls.has(x.roll_number.toLowerCase()) || seenR.has(x.roll_number.toLowerCase())) x.problem = 'roll number already used in this batch';
+      else if (x.mentor_email && !facByEmail[x.mentor_email]) x.problem = 'mentor email is not a faculty login';
+      seenE.add(x.email); seenR.add(x.roll_number.toLowerCase());
+      return x;
+    });
+    if (rows.length > 300) { out.innerHTML = '<div class="note">More than 300 rows. Split the file into smaller files.</div>'; return; }
+    const ok = rows.filter((x) => !x.problem);
+    out.innerHTML = `<p><strong>${ok.length} ready</strong>${rows.length - ok.length ? ` · <span style="color:var(--bad)">${rows.length - ok.length} with problems (will be skipped)</span>` : ''} · batch ${esc(batches.find((b) => b.batch_id === batch)?.batch_name || '')}</p>
+      <div class="tbox" style="max-height:260px;overflow:auto"><table><thead><tr><th>Row</th><th>Name</th><th>Email</th><th>Roll</th><th>Mentor</th><th>Check</th></tr></thead><tbody>
+      ${rows.map((x) => `<tr><td>${x.line}</td><td>${esc(x.full_name)}</td><td class="small">${esc(x.email)}</td><td>${esc(x.roll_number)}</td><td class="small">${esc(x.mentor_email || '-')}</td><td class="small" style="color:${x.problem ? 'var(--bad)' : 'inherit'}">${esc(x.problem || 'OK')}</td></tr>`).join('')}</tbody></table></div>
+      ${ok.length ? `<div class="row" style="margin-top:10px"><button class="btn" id="bkGo">Create ${ok.length} student account${ok.length > 1 ? 's' : ''}</button><span class="small muted">About 1 second per student. Keep this page open.</span></div>` : ''}`;
+    const go = $('#bkGo'); if (!go) return;
+    go.onclick = async () => {
+      if (!confirm(`Create ${ok.length} student logins in this batch?`)) return;
+      go.disabled = true; $('#bkf').disabled = true;
+      const res = [];
+      for (let i = 0; i < ok.length; i++) {
+        const x = ok[i]; go.textContent = `Creating ${i + 1} of ${ok.length}…`;
+        try {
+          const r = await adminCall({ action: 'create_user', full_name: x.full_name, email: x.email, role: 'STUDENT', batch_id: batch, roll_number: x.roll_number });
+          let note = '';
+          if (x.mentor_email) {
+            try {
+              const st = await q(sb.from('students').select('student_id').eq('user_id', r.user_id).limit(1));
+              await q(sb.from('mentor_assignments').insert({ institution_id: S.me.institution_id, student_id: st[0].student_id, faculty_id: facByEmail[x.mentor_email], effective_from: localISO(), assigned_by: S.me.user_id }));
+            } catch { note = 'created; mentor not assigned, assign it below'; }
+          }
+          res.push({ ...x, temp_password: r.temp_password, status: note || 'created' });
+        } catch (err) { res.push({ ...x, temp_password: '', status: 'failed: ' + (err.message || err) }); }
+      }
+      const made = res.filter((r) => r.temp_password).length;
+      const csv = ['full_name,email,roll_number,mentor_email,temporary_password,status', ...res.map((r) => [r.full_name, r.email, r.roll_number, r.mentor_email, r.temp_password, r.status].map(csvCell).join(','))].join('\n');
+      const stamp = localISO();
+      out.innerHTML = `<div class="note"><strong>${made} of ${ok.length} accounts created.</strong> Download the login list now: the temporary passwords are shown only once. Give each student only their own line, then delete the file. Each student sets their own password at first sign-in.
+        <div class="row" style="margin-top:8px"><button class="btn" id="bkDl">Download login list (CSV)</button></div></div>
+        ${res.some((r) => !r.temp_password) ? `<div class="small" style="color:var(--bad)">${res.filter((r) => !r.temp_password).map((r) => `Row ${r.line}: ${esc(r.status)}`).join('<br>')}</div>` : ''}`;
+      $('#bkDl').onclick = () => downloadText(`FAP_student_logins_${stamp}.csv`, csv);
+      downloadText(`FAP_student_logins_${stamp}.csv`, csv);
+    };
+  };
+}
 async function viewManage() {
   setTab('manage');
   if (!canManage()) { location.hash = '#/'; return; }
@@ -710,6 +794,14 @@ async function viewManage() {
         <div class="row" style="margin-top:14px"><button class="btn" id="ubtn">Create account</button><span class="small muted">A temporary password is generated and shown once.</span></div>
       </form></div>
 
+    <div class="sec card"><h2>Add many students at once (CSV)</h2>
+      <p class="small muted">One row per student. Columns: <strong>full_name, email, roll_number, mentor_email</strong> (mentor_email is optional; it must be the login email of a faculty member already added). Save from Excel as "CSV UTF-8". <a href="#" id="tpl">Download a blank template</a>.</p>
+      <div class="grid">
+        <div><label class="lbl" for="bkb">Batch for all rows</label><select id="bkb">${batches.filter((b) => b.is_active).map((b) => `<option value="${b.batch_id}">${esc(b.batch_name)}</option>`).join('') || '<option value="">Create a batch first</option>'}</select></div>
+        <div><label class="lbl" for="bkf">CSV file</label><input id="bkf" type="file" accept=".csv,text/csv"></div>
+      </div>
+      <div id="bkOut" style="margin-top:12px"></div></div>
+
     <div class="sec"><h2>People (${users.length})</h2><div class="tbox"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th></th></tr></thead><tbody>
       ${users.map((u) => `<tr><td>${esc(u.full_name)}</td><td class="small">${esc(u.email || '-')}</td><td class="small">${esc(rolesOf(u.user_id).join(', '))}</td>
         <td>${u.is_active ? (u.auth_user_id ? (u.must_change_password ? '<span class="badge b-PENDING">Temp password</span>' : '<span class="badge b-VERIFIED">Active</span>') : '<span class="badge b-DRAFT">No login</span>') : '<span class="badge b-CLOSED">Inactive</span>'}</td>
@@ -717,7 +809,10 @@ async function viewManage() {
     </tbody></table></div></div>
 
     <div class="sec card"><h2>Batches</h2>
-      <div class="small muted">${batches.map((b) => `${esc(b.batch_name)} (${esc(b.current_phase || '')})`).join(' · ') || 'No batches yet.'}</div>
+      ${batches.length ? `<div class="tbox"><table><thead><tr><th>Batch</th><th>Admission</th><th>Current phase</th><th>Active students</th><th>Year-end</th></tr></thead><tbody>
+        ${batches.map((b) => `<tr><td>${esc(b.batch_name)}${b.is_active ? '' : ' <span class="small muted">(closed)</span>'}</td><td>${esc(b.admission_year)}</td><td>${esc(b.current_phase || '')}</td><td>${students.filter((s) => s.batch_id === b.batch_id && s.is_active).length}</td>
+          <td>${b.is_active && b.current_phase !== 'Phase III Part 2' && canPromote() ? `<button class="btn ghost" data-promote="${b.batch_id}" data-name="${esc(b.batch_name)}" data-ph="${esc(b.current_phase || '')}">Move to next phase</button>` : '<span class="small muted">-</span>'}</td></tr>`).join('')}
+      </tbody></table></div><p class="small muted">Use "Move to next phase" once a year after the university result. Families, visits and logbook stay with each student; new visits are tagged with the new phase.</p>` : '<div class="small muted">No batches yet.</div>'}
       <form id="bf" class="grid" style="margin-top:10px">
         <div><label class="lbl" for="by">Academic year</label><input id="by" placeholder="2026-27" required></div>
         <div><label class="lbl" for="bn">Batch name</label><input id="bn" placeholder="MBBS 2026" required></div>
@@ -782,6 +877,12 @@ async function viewManage() {
       toast('Batch added'); viewManage();
     } catch (err) { fail(err); }
   };
+  app.querySelectorAll('[data-promote]').forEach((b) => (b.onclick = async () => {
+    if (!confirm(`Move ${b.dataset.name} from ${b.dataset.ph} to the next phase? All active students of this batch move together. This is recorded in the audit log.`)) return;
+    b.disabled = true;
+    try { const nxt = await q(sb.rpc('fap_promote_batch', { p_batch: b.dataset.promote })); toast(`${b.dataset.name} is now in ${nxt}`); viewManage(); } catch (err) { fail(err); b.disabled = false; }
+  }));
+  wireBulk({ users, faculty, students, batches });
   app.querySelectorAll('[data-assign]').forEach((sel) => (sel.onchange = async () => {
     if (!sel.value) return;
     sel.disabled = true;
